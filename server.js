@@ -103,6 +103,35 @@ function authMiddleware(req, res, next) {
   next();
 }
 
+// ─── Auto-migrate ─────────────────────────────────────────────────────────
+
+async function autoMigrate() {
+  try {
+    const [rows] = await getPool().query(
+      `SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = ? AND table_name = 'admin_users'`,
+      [process.env.DB_NAME]
+    );
+    if (rows[0].cnt > 0) {
+      console.log('Tables already exist — skipping migration');
+      return;
+    }
+    console.log('Tables not found — running auto-migration...');
+    const { readFileSync } = await import('fs');
+    const schemaPath = join(__dirname, 'api', 'schema.sql');
+    const schema = readFileSync(schemaPath, 'utf-8');
+    const statements = schema
+      .split(';')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+    for (const stmt of statements) {
+      await getPool().query(stmt);
+    }
+    console.log('Auto-migration complete — all tables created');
+  } catch (e) {
+    console.error('Auto-migration failed:', e.message);
+  }
+}
+
 // ─── Public routes (no auth) ───────────────────────────────────────────────
 
 app.get('/api/health', (_req, res) => {
@@ -421,8 +450,10 @@ if (existsSync(distDir)) {
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`HomeShield running on port ${PORT}`);
-  console.log(`DB: ${process.env.DB_HOST}/${process.env.DB_NAME}`);
-  console.log(`dist/: ${existsSync(distDir) ? 'ready' : 'MISSING'}`);
+autoMigrate().then(() => {
+  app.listen(PORT, () => {
+    console.log(`HomeShield running on port ${PORT}`);
+    console.log(`DB: ${process.env.DB_HOST}/${process.env.DB_NAME}`);
+    console.log(`dist/: ${existsSync(distDir) ? 'ready' : 'MISSING'}`);
+  });
 });

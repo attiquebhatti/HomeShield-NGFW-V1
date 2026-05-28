@@ -1,4 +1,6 @@
+import { Component, ReactNode } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { Shield, AlertTriangle } from 'lucide-react';
 import { AuthProvider, useAuth } from './lib/auth';
 import { Layout } from './components/Layout';
 import { Login } from './pages/Login';
@@ -15,13 +17,94 @@ import { AuditLog } from './pages/AuditLog';
 import { Backup } from './pages/Backup';
 import { Settings } from './pages/Settings';
 
+class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-brand-main flex items-center justify-center p-6">
+          <div className="max-w-md w-full text-center space-y-6">
+            <div className="w-16 h-16 bg-danger/15 border border-danger/25 rounded-2xl flex items-center justify-center mx-auto">
+              <AlertTriangle className="w-8 h-8 text-danger" />
+            </div>
+            <h1 className="text-xl font-bold text-text-primary">Something went wrong</h1>
+            <p className="text-sm text-text-muted">
+              The application encountered an unexpected error. Please refresh the page or contact your administrator.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-6 py-2.5 bg-brand-gold hover:bg-brand-gold-bright text-brand-main rounded-lg text-sm font-semibold transition-all"
+            >
+              Refresh Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+function ConfigError() {
+  return (
+    <div className="min-h-screen bg-brand-main flex items-center justify-center p-6">
+      <div className="max-w-lg w-full text-center space-y-6">
+        <div className="w-16 h-16 bg-brand-gold/15 border border-brand-gold/30 rounded-2xl flex items-center justify-center mx-auto shadow-gold-md">
+          <Shield className="w-8 h-8 text-brand-gold" />
+        </div>
+        <h1 className="text-2xl font-bold text-text-primary">HomeShield NGFW</h1>
+        <div className="bg-brand-panel border border-border-muted rounded-xl p-6 text-left space-y-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+            <div>
+              <h2 className="text-sm font-semibold text-text-primary">Configuration Required</h2>
+              <p className="text-xs text-text-muted mt-1">
+                The application cannot connect to the database. Environment variables are missing or not configured correctly.
+              </p>
+            </div>
+          </div>
+          <div className="bg-brand-panel-soft rounded-lg p-4 border border-border-muted space-y-3">
+            <p className="text-xs font-medium text-text-secondary">Required environment variables:</p>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-danger"></span>
+                <code className="text-xs font-mono text-text-muted">VITE_SUPABASE_URL</code>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-danger"></span>
+                <code className="text-xs font-mono text-text-muted">VITE_SUPABASE_ANON_KEY</code>
+              </div>
+            </div>
+          </div>
+          <div className="bg-brand-panel-soft rounded-lg p-4 border border-border-muted">
+            <p className="text-xs text-text-muted leading-relaxed">
+              These must be set <strong className="text-text-secondary">before building</strong> the application.
+              If deploying to a hosting provider, add them in your hosting dashboard's environment variables section,
+              then trigger a rebuild.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProtectedLayout() {
   const { user, loading } = useAuth();
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <div className="flex items-center gap-3 text-gray-400">
+      <div className="min-h-screen bg-brand-main flex items-center justify-center">
+        <div className="flex items-center gap-3 text-text-muted">
           <svg className="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
@@ -37,8 +120,9 @@ function ProtectedLayout() {
 }
 
 function AppRoutes() {
-  const { user, loading } = useAuth();
+  const { user, loading, configured } = useAuth();
 
+  if (!configured) return <ConfigError />;
   if (loading) return null;
 
   return (
@@ -65,10 +149,12 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }

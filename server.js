@@ -1,7 +1,8 @@
 import express from 'express';
 import mysql from 'mysql2/promise';
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
-import { hash, compare } from 'bcryptjs';
+import bcrypt from 'bcryptjs';
+const { hash, compare } = bcrypt;
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 

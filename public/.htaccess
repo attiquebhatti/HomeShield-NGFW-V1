@@ -1,8 +1,14 @@
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
-  RewriteRule ^index\.html$ - [L]
+
+  # Do NOT rewrite API requests — pass through to the Node.js server
+  RewriteRule ^api(/|$) - [L]
+
+  # Serve existing files/directories as-is
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteCond %{REQUEST_FILENAME} !-d
+
+  # For all other routes, serve the React SPA
   RewriteRule . /index.html [L]
 </IfModule>

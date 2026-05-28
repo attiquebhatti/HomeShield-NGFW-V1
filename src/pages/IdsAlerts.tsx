@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { CheckCheck, RefreshCw, Search } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -31,7 +31,7 @@ export function IdsAlerts() {
   const [showAcked, setShowAcked] = useState(false);
 
   async function fetchAlerts() {
-    const { data } = await supabase
+    const { data } = await api
       .from('ids_alerts')
       .select('*')
       .order('timestamp', { ascending: false })
@@ -43,13 +43,13 @@ export function IdsAlerts() {
   useEffect(() => { fetchAlerts(); }, []);
 
   async function acknowledge(id: string) {
-    await supabase.from('ids_alerts').update({ acknowledged: true }).eq('id', id);
+    await api.from('ids_alerts').update({ acknowledged: true }).eq('id', id);
     fetchAlerts();
   }
 
   async function acknowledgeAll() {
     const ids = filtered.filter(a => !a.acknowledged).map(a => a.id);
-    await supabase.from('ids_alerts').update({ acknowledged: true }).in('id', ids);
+    await api.from('ids_alerts').update({ acknowledged: true }).in('id', ids);
     fetchAlerts();
   }
 

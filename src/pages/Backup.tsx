@@ -3,7 +3,7 @@ import {
   Download, Upload, Trash2, Shield, CheckCircle2, AlertTriangle,
   Clock, Database, Lock, RefreshCw, FileJson
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card, CardHeader, CardBody } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -46,7 +46,7 @@ export function Backup() {
   const [exportLabel, setExportLabel] = useState('');
 
   async function fetchRecords() {
-    const { data } = await supabase
+    const { data } = await api
       .from('backup_records')
       .select('*')
       .order('created_at', { ascending: false });
@@ -60,10 +60,10 @@ export function Backup() {
     setExporting(true);
 
     const [policies, dnsEntries, natRules, settings] = await Promise.all([
-      supabase.from('firewall_policies').select('*'),
-      supabase.from('dns_entries').select('*'),
-      supabase.from('nat_rules').select('*'),
-      supabase.from('system_settings').select('*'),
+      api.from('firewall_policies').select('*'),
+      api.from('dns_entries').select('*'),
+      api.from('nat_rules').select('*'),
+      api.from('system_settings').select('*'),
     ]);
 
     const payload = {
@@ -79,7 +79,7 @@ export function Backup() {
     const sizeBytes = new TextEncoder().encode(json).length;
     const checksum = `sha256:${sizeBytes.toString(16)}`;
 
-    await supabase.from('backup_records').insert({
+    await api.from('backup_records').insert({
       created_by: 'admin',
       label: label || `Manual backup ${new Date().toLocaleDateString()}`,
       description: 'User-initiated configuration export',
@@ -90,7 +90,7 @@ export function Backup() {
       checksum,
     });
 
-    await supabase.from('audit_log').insert({
+    await api.from('audit_log').insert({
       actor: 'admin',
       action: 'export',
       resource_type: 'backup',
@@ -135,19 +135,19 @@ export function Backup() {
     setImporting(true);
 
     if (parsed.firewall_policies?.length) {
-      await supabase.from('firewall_policies').upsert(parsed.firewall_policies, { onConflict: 'id' });
+      await api.from('firewall_policies').upsert(parsed.firewall_policies, { onConflict: 'id' });
     }
     if (parsed.dns_entries?.length) {
-      await supabase.from('dns_entries').upsert(parsed.dns_entries, { onConflict: 'id' });
+      await api.from('dns_entries').upsert(parsed.dns_entries, { onConflict: 'id' });
     }
     if (parsed.nat_rules?.length) {
-      await supabase.from('nat_rules').upsert(parsed.nat_rules, { onConflict: 'id' });
+      await api.from('nat_rules').upsert(parsed.nat_rules, { onConflict: 'id' });
     }
     if (parsed.system_settings?.length) {
-      await supabase.from('system_settings').upsert(parsed.system_settings, { onConflict: 'key' });
+      await api.from('system_settings').upsert(parsed.system_settings, { onConflict: 'key' });
     }
 
-    await supabase.from('audit_log').insert({
+    await api.from('audit_log').insert({
       actor: 'admin',
       action: 'restore',
       resource_type: 'backup',
@@ -166,7 +166,7 @@ export function Backup() {
   }
 
   async function deleteRecord(id: string) {
-    await supabase.from('backup_records').delete().eq('id', id);
+    await api.from('backup_records').delete().eq('id', id);
     setDeleteId(null);
     fetchRecords();
   }

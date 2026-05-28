@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Search, RefreshCw, ArrowUpRight, ArrowDownLeft, ChevronLeft, ChevronRight } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -37,7 +37,7 @@ export function Logs() {
   const [autoRefresh, setAutoRefresh] = useState(true);
 
   const fetchLogs = useCallback(async () => {
-    let query = supabase
+    let query = api
       .from('firewall_logs')
       .select('*', { count: 'exact' })
       .order('timestamp', { ascending: false })

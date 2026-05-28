@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Save, Shield, Server, Clock, Globe, AlertTriangle, RefreshCw } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card, CardHeader, CardBody } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import type { SystemSetting } from '../lib/database.types';
@@ -96,7 +96,7 @@ export function Settings() {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   async function fetchSettings() {
-    const { data } = await supabase.from('system_settings').select('*');
+    const { data } = await api.from('system_settings').select('*');
     const map: SettingsMap = {};
     (data ?? []).forEach((s: SystemSetting) => { map[s.key] = s.value; });
     setSettings(map);
@@ -109,7 +109,7 @@ export function Settings() {
   async function handleSave() {
     setSaving(true);
     const updates = Object.entries(settings).map(([key, value]) => ({ key, value, description: '', updated_at: new Date().toISOString() }));
-    await supabase.from('system_settings').upsert(updates, { onConflict: 'key' });
+    await api.from('system_settings').upsert(updates, { onConflict: 'key' });
     setSaved({ ...settings });
     setSaving(false);
     setSaveSuccess(true);

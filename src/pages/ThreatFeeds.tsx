@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2, Rss, ToggleRight, ToggleLeft, Clock } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -38,7 +38,7 @@ export function ThreatFeeds() {
   const [form, setForm] = useState<typeof empty>(empty);
 
   async function fetchFeeds() {
-    const { data } = await supabase.from('threat_feeds').select('*').order('created_at', { ascending: false });
+    const { data } = await api.from('threat_feeds').select('*').order('created_at', { ascending: false });
     setFeeds(data ?? []);
     setLoading(false);
   }
@@ -48,7 +48,7 @@ export function ThreatFeeds() {
   async function handleAdd() {
     if (!form.name.trim()) return;
     setSaving(true);
-    await supabase.from('threat_feeds').insert(form);
+    await api.from('threat_feeds').insert(form);
     setSaving(false);
     setModalOpen(false);
     setForm(empty);
@@ -56,13 +56,13 @@ export function ThreatFeeds() {
   }
 
   async function handleDelete(id: string) {
-    await supabase.from('threat_feeds').delete().eq('id', id);
+    await api.from('threat_feeds').delete().eq('id', id);
     setDeleteId(null);
     fetchFeeds();
   }
 
   async function toggle(feed: ThreatFeed) {
-    await supabase.from('threat_feeds').update({ enabled: !feed.enabled }).eq('id', feed.id);
+    await api.from('threat_feeds').update({ enabled: !feed.enabled }).eq('id', feed.id);
     fetchFeeds();
   }
 

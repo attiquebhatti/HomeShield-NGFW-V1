@@ -1,12 +1,3 @@
-import { createClient } from '@supabase/supabase-js';
-import type { Database } from './database.types';
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-
-export const supabaseConfigured = !!(supabaseUrl && supabaseAnonKey);
-
-export const supabase = createClient<Database>(
-  supabaseUrl || 'https://placeholder.supabase.co',
-  supabaseAnonKey || 'placeholder'
-);
+// Supabase is no longer used. Database is now served through the PHP API at /api/.
+// See src/lib/api.ts for the replacement client.
+export {};

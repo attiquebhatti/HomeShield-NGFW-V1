@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2, Search, Globe, ShieldOff, ShieldCheck, RefreshCw } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -28,8 +28,8 @@ export function DnsFiltering() {
 
   async function fetchData() {
     const [enRes, logRes] = await Promise.all([
-      supabase.from('dns_entries').select('*').order('created_at', { ascending: false }),
-      supabase.from('dns_logs').select('*').order('timestamp', { ascending: false }).limit(20),
+      api.from('dns_entries').select('*').order('created_at', { ascending: false }),
+      api.from('dns_logs').select('*').order('timestamp', { ascending: false }).limit(20),
     ]);
     setEntries(enRes.data ?? []);
     setLogs(logRes.data ?? []);
@@ -41,7 +41,7 @@ export function DnsFiltering() {
   async function handleAdd() {
     if (!form.domain.trim()) return;
     setSaving(true);
-    await supabase.from('dns_entries').insert({ ...form, source: 'manual', enabled: true });
+    await api.from('dns_entries').insert({ ...form, source: 'manual', enabled: true });
     setSaving(false);
     setModalOpen(false);
     setForm({ domain: '', list_type: 'blocklist', category: 'custom', note: '' });
@@ -49,13 +49,13 @@ export function DnsFiltering() {
   }
 
   async function handleDelete(id: string) {
-    await supabase.from('dns_entries').delete().eq('id', id);
+    await api.from('dns_entries').delete().eq('id', id);
     setDeleteId(null);
     fetchData();
   }
 
   async function toggleEntry(entry: DnsEntry) {
-    await supabase.from('dns_entries').update({ enabled: !entry.enabled }).eq('id', entry.id);
+    await api.from('dns_entries').update({ enabled: !entry.enabled }).eq('id', entry.id);
     fetchData();
   }
 

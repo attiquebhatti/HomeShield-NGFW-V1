@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Plus, Pencil, Trash2, ToggleRight, ToggleLeft } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -52,7 +52,7 @@ export function Nat() {
   const [editTarget, setEditTarget] = useState<NatRule | null>(null);
   const [form, setForm] = useState<typeof emptyRule>(emptyRule);
 
-  async function fetchRules() { const { data } = await supabase.from('nat_rules').select('*').order('priority'); setRules(data ?? []); setLoading(false); }
+  async function fetchRules() { const { data } = await api.from('nat_rules').select('*').order('priority'); setRules(data ?? []); setLoading(false); }
   useEffect(() => { fetchRules(); }, []);
 
   function openCreate() { setEditTarget(null); setForm(emptyRule); setModalOpen(true); }
@@ -61,13 +61,13 @@ export function Nat() {
   async function handleSubmit() {
     if (!form.name.trim()) return;
     setSaving(true);
-    if (editTarget) { await supabase.from('nat_rules').update({ ...form, updated_at: new Date().toISOString() }).eq('id', editTarget.id); }
-    else { await supabase.from('nat_rules').insert(form); }
+    if (editTarget) { await api.from('nat_rules').update({ ...form, updated_at: new Date().toISOString() }).eq('id', editTarget.id); }
+    else { await api.from('nat_rules').insert(form); }
     setSaving(false); setModalOpen(false); fetchRules();
   }
 
-  async function handleDelete(id: string) { await supabase.from('nat_rules').delete().eq('id', id); setDeleteId(null); fetchRules(); }
-  async function toggle(r: NatRule) { await supabase.from('nat_rules').update({ enabled: !r.enabled }).eq('id', r.id); fetchRules(); }
+  async function handleDelete(id: string) { await api.from('nat_rules').delete().eq('id', id); setDeleteId(null); fetchRules(); }
+  async function toggle(r: NatRule) { await api.from('nat_rules').update({ enabled: !r.enabled }).eq('id', r.id); fetchRules(); }
 
   return (
     <div className="p-4 lg:p-6 space-y-5">

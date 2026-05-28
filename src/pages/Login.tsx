@@ -1,7 +1,7 @@
 import { useState, FormEvent } from 'react';
 import { Shield, Eye, EyeOff, AlertCircle, Lock } from 'lucide-react';
 import { useAuth } from '../lib/auth';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 
 export function Login() {
   const { signIn } = useAuth();
@@ -39,9 +39,9 @@ export function Login() {
       return;
     }
     setLoading(true);
-    const { error: signUpErr } = await supabase.auth.signUp({ email, password });
+    const { error: signUpErr } = await api.auth.signUp(email, password);
     if (signUpErr) {
-      setError(signUpErr.message);
+      setError(signUpErr);
       setLoading(false);
       return;
     }

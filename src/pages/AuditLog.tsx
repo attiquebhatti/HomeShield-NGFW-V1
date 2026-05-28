@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { RefreshCw, Search, ChevronLeft, ChevronRight } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -26,7 +26,7 @@ export function AuditLog() {
   const [search, setSearch] = useState('');
 
   const fetchEntries = useCallback(async () => {
-    let query = supabase
+    let query = api
       .from('audit_log')
       .select('*', { count: 'exact' })
       .order('timestamp', { ascending: false })

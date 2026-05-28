@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Network, RefreshCw, ArrowDownLeft, ArrowUpRight, Pencil } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -31,7 +31,7 @@ export function Interfaces() {
   const [saving, setSaving] = useState(false);
 
   async function fetchIfaces() {
-    const { data } = await supabase.from('network_interfaces').select('*').order('name');
+    const { data } = await api.from('network_interfaces').select('*').order('name');
     setIfaces(data ?? []);
     setLoading(false);
   }
@@ -46,7 +46,7 @@ export function Interfaces() {
   async function handleSave() {
     if (!editTarget) return;
     setSaving(true);
-    await supabase.from('network_interfaces').update({ role: form.role, display_name: form.display_name, updated_at: new Date().toISOString() }).eq('id', editTarget.id);
+    await api.from('network_interfaces').update({ role: form.role, display_name: form.display_name, updated_at: new Date().toISOString() }).eq('id', editTarget.id);
     setSaving(false);
     setEditTarget(null);
     fetchIfaces();

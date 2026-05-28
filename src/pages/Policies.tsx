@@ -4,7 +4,7 @@ import {
   Play, RotateCcw, CheckCircle2, AlertTriangle, Code2, X,
   Terminal, Monitor, Server
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card, CardHeader } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -218,7 +218,7 @@ export function Policies() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function fetchPolicies() {
-    const { data } = await supabase
+    const { data } = await api
       .from('firewall_policies')
       .select('*')
       .order('priority', { ascending: true });
@@ -246,9 +246,9 @@ export function Policies() {
     if (!form.name.trim()) return;
     setSaving(true);
     if (editTarget) {
-      await supabase.from('firewall_policies').update({ ...form, updated_at: new Date().toISOString() }).eq('id', editTarget.id);
+      await api.from('firewall_policies').update({ ...form, updated_at: new Date().toISOString() }).eq('id', editTarget.id);
     } else {
-      await supabase.from('firewall_policies').insert(form);
+      await api.from('firewall_policies').insert(form);
     }
     setSaving(false);
     setModalOpen(false);
@@ -256,13 +256,13 @@ export function Policies() {
   }
 
   async function handleDelete(id: string) {
-    await supabase.from('firewall_policies').delete().eq('id', id);
+    await api.from('firewall_policies').delete().eq('id', id);
     setDeleteId(null);
     fetchPolicies();
   }
 
   async function toggleEnabled(policy: FirewallPolicy) {
-    await supabase.from('firewall_policies').update({ enabled: !policy.enabled }).eq('id', policy.id);
+    await api.from('firewall_policies').update({ enabled: !policy.enabled }).eq('id', policy.id);
     fetchPolicies();
   }
 
@@ -281,7 +281,7 @@ export function Policies() {
 
   async function confirmApply() {
     const { osTarget, compiledOutput } = applyState;
-    const { data: record } = await supabase.from('rule_apply_history').insert({
+    const { data: record } = await api.from('rule_apply_history').insert({
       applied_by: 'admin',
       mode: 'host',
       os_target: osTarget,
@@ -290,9 +290,9 @@ export function Policies() {
       rollback_timer_seconds: ROLLBACK_SECONDS,
       compiled_output: compiledOutput,
       rules_snapshot: policies,
-    }).select().maybeSingle();
+    });
 
-    await supabase.from('audit_log').insert({
+    await api.from('audit_log').insert({
       actor: 'admin',
       action: 'apply',
       resource_type: 'firewall_ruleset',
@@ -319,7 +319,7 @@ export function Policies() {
     if (countdownRef.current) clearInterval(countdownRef.current);
     const { applyId } = applyState;
     if (applyId) {
-      await supabase.from('rule_apply_history')
+      await api.from('rule_apply_history')
         .update({ status: 'confirmed', confirmed_at: new Date().toISOString() })
         .eq('id', applyId);
     }
@@ -329,11 +329,11 @@ export function Policies() {
 
   async function triggerRollback(applyId: string | null) {
     if (applyId) {
-      await supabase.from('rule_apply_history')
+      await api.from('rule_apply_history')
         .update({ status: 'rolled_back', rolled_back_at: new Date().toISOString() })
         .eq('id', applyId);
     }
-    await supabase.from('audit_log').insert({
+    await api.from('audit_log').insert({
       actor: 'system',
       action: 'rollback',
       resource_type: 'firewall_ruleset',

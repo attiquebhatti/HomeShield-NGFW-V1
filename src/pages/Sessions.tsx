@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, ArrowUpRight, ArrowDownLeft, Activity } from 'lucide-react';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -27,7 +27,7 @@ export function Sessions() {
 
   async function fetchSessions() {
     setLoading(true);
-    const { data } = await supabase.from('sessions').select('*').order('last_seen', { ascending: false }).limit(100);
+    const { data } = await api.from('sessions').select('*').order('last_seen', { ascending: false }).limit(100);
     setSessions(data ?? []);
     setLoading(false);
   }

@@ -5,7 +5,7 @@ import {
   Cpu, Server, Clock, Eye, RefreshCw, ChevronRight
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { supabase } from '../lib/supabase';
+import { api } from '../lib/api';
 import { Card, CardHeader, CardBody } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { StatusDot } from '../components/ui/StatusDot';
@@ -121,13 +121,13 @@ export function Dashboard() {
     const [
       policiesRes, logsRes, alertsRes, ifaceRes, sessRes, healthRes, historyRes
     ] = await Promise.all([
-      supabase.from('firewall_policies').select('id, enabled'),
-      supabase.from('firewall_logs').select('*').order('timestamp', { ascending: false }).limit(50),
-      supabase.from('ids_alerts').select('*').order('timestamp', { ascending: false }).limit(5),
-      supabase.from('network_interfaces').select('*'),
-      supabase.from('sessions').select('*').order('last_seen', { ascending: false }).limit(5),
-      supabase.from('system_health_snapshots').select('*').order('recorded_at', { ascending: false }).limit(10),
-      supabase.from('rule_apply_history').select('*').order('applied_at', { ascending: false }).limit(5),
+      api.from('firewall_policies').select('id, enabled'),
+      api.from('firewall_logs').select('*').order('timestamp', { ascending: false }).limit(50),
+      api.from('ids_alerts').select('*').order('timestamp', { ascending: false }).limit(5),
+      api.from('network_interfaces').select('*'),
+      api.from('sessions').select('*').order('last_seen', { ascending: false }).limit(5),
+      api.from('system_health_snapshots').select('*').order('recorded_at', { ascending: false }).limit(10),
+      api.from('rule_apply_history').select('*').order('applied_at', { ascending: false }).limit(5),
     ]);
 
     const policies = policiesRes.data ?? [];

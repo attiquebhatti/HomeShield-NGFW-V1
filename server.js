@@ -1,11 +1,12 @@
 import express from 'express';
 import mysql from 'mysql2/promise';
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
-import bcrypt from 'bcryptjs';
-const { hash, compare } = bcrypt;
+import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import bcrypt from 'bcryptjs';
 
+const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -92,16 +93,21 @@ function jwtVerify(token) {
   } catch { return null; }
 }
 
-function requireAuth(req, res) {
+function authMiddleware(req, res, next) {
   const auth = req.headers.authorization || '';
   const match = auth.match(/^Bearer\s+(.+)$/i);
-  if (!match) { res.status(401).json({ error: 'Missing authorization token' }); return null; }
+  if (!match) return res.status(401).json({ error: 'Missing authorization token' });
   const payload = jwtVerify(match[1]);
-  if (!payload) { res.status(401).json({ error: 'Invalid or expired token' }); return null; }
-  return payload;
+  if (!payload) return res.status(401).json({ error: 'Invalid or expired token' });
+  req.user = payload;
+  next();
 }
 
-// ─── Auth Routes ───────────────────────────────────────────────────────────
+// ─── Public routes (no auth) ───────────────────────────────────────────────
+
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
 
 app.post('/api/auth/signup', async (req, res) => {
   try {
@@ -111,7 +117,7 @@ app.post('/api/auth/signup', async (req, res) => {
 
     const existing = await query('SELECT id FROM admin_users WHERE email = ? LIMIT 1', [email]);
     if (existing.length > 0)
-      return res.status(409).json({ error: 'An account already exists' });
+      return res.status(409).json({ error: 'An account already exists. Please sign in.' });
 
     const passwordHash = await hash(password, 12);
     await query(
@@ -120,6 +126,7 @@ app.post('/api/auth/signup', async (req, res) => {
     );
     res.json({ message: 'Account created. Please sign in.' });
   } catch (e) {
+    console.error('signup error:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -135,29 +142,23 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
 
     const user = { id: rows[0].id, email: rows[0].email };
-    const token = jwtSign(user);
-    res.json({ token, user });
+    res.json({ token: jwtSign(user), user });
   } catch (e) {
+    console.error('login error:', e);
     res.status(500).json({ error: e.message });
   }
 });
 
-app.get('/api/auth/me', (req, res) => {
-  const payload = requireAuth(req, res);
-  if (!payload) return;
-  res.json({ user: { id: payload.id, email: payload.email } });
+// ─── Protected routes (require auth) ──────────────────────────────────────
+
+const api = express.Router();
+api.use(authMiddleware);
+
+api.get('/auth/me', (req, res) => {
+  res.json({ user: { id: req.user.id, email: req.user.email } });
 });
 
-// ─── Auth middleware for all /api/* routes below ───────────────────────────
-
-app.use('/api', (req, res, next) => {
-  const payload = requireAuth(req, res);
-  if (!payload) return;
-  req.user = payload;
-  next();
-});
-
-// ─── Generic CRUD helpers ──────────────────────────────────────────────────
+// ─── CRUD config ──────────────────────────────────────────────────────────
 
 const TABLE_MAP = {
   'firewall-policies': 'firewall_policies',
@@ -219,23 +220,32 @@ const BOOL_FIELDS = {
   'backup-records': ['encrypted'],
 };
 
-function safeName(name) {
-  return name.replace(/[^a-z0-9_]/gi, '');
+function safeName(name) { return name.replace(/[^a-z0-9_]/gi, ''); }
+
+function prepareFields(data, bools = []) {
+  const out = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== null && typeof v === 'object') out[k] = JSON.stringify(v);
+    else if (bools.includes(k)) out[k] = v ? 1 : 0;
+    else out[k] = v;
+  }
+  return out;
 }
+
+// ─── CRUD handlers ─────────────────────────────────────────────────────────
 
 async function listRows(resource, req, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
 
   const order = ORDER_MAP[resource] || { col: 'id', dir: 'ASC' };
-  const pageSize = parseInt(req.query.page_size) || 100;
+  const pageSize = Math.min(parseInt(req.query.page_size) || 100, 1000);
   const page = parseInt(req.query.page) || 0;
   const offset = page * pageSize;
 
   const conditions = [];
   const params = [];
 
-  // Column filters
   for (const col of (FILTER_COLS[resource] || [])) {
     if (req.query[col] !== undefined) {
       conditions.push(`\`${safeName(col)}\` = ?`);
@@ -243,7 +253,6 @@ async function listRows(resource, req, res) {
     }
   }
 
-  // Search
   if (req.query.search) {
     const cols = SEARCH_COLS[resource] || [];
     if (cols.length) {
@@ -255,86 +264,86 @@ async function listRows(resource, req, res) {
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const orderClause = `ORDER BY \`${safeName(order.col)}\` ${order.dir}`;
 
-  const [countRows] = await getPool().execute(
-    `SELECT COUNT(*) as cnt FROM \`${table}\` ${where}`,
-    params
-  );
-  const total = countRows[0]?.cnt || 0;
-
-  const [rows] = await getPool().execute(
-    `SELECT * FROM \`${table}\` ${where} ${orderClause} LIMIT ? OFFSET ?`,
-    [...params, pageSize, offset]
-  );
-
-  res.json({ data: castRows(rows), count: Number(total) });
+  try {
+    const [countRows] = await getPool().execute(`SELECT COUNT(*) as cnt FROM \`${table}\` ${where}`, params);
+    const total = countRows[0]?.cnt || 0;
+    const [rows] = await getPool().execute(
+      `SELECT * FROM \`${table}\` ${where} ${orderClause} LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    );
+    res.json({ data: castRows(rows), count: Number(total) });
+  } catch (e) {
+    console.error(`listRows ${resource}:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
 }
 
 async function getRow(resource, id, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
-  const rows = await query(`SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`, [id]);
-  if (!rows.length) return res.status(404).json({ error: 'Not found' });
-  res.json({ data: castRow(rows[0]) });
-}
-
-function prepareFields(data, bools = []) {
-  const out = {};
-  for (const [k, v] of Object.entries(data)) {
-    if (Array.isArray(v) || (v !== null && typeof v === 'object')) {
-      out[k] = JSON.stringify(v);
-    } else if (bools.includes(k)) {
-      out[k] = v ? 1 : 0;
-    } else {
-      out[k] = v;
-    }
+  try {
+    const rows = await query(`SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ data: castRow(rows[0]) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  return out;
 }
 
 async function insertRow(resource, body, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
   const bools = BOOL_FIELDS[resource] || [];
+  try {
+    const data = prepareFields(body, bools);
+    if (!data.id) data.id = randomUUID();
+    if (!data.created_at) data.created_at = now();
 
-  const data = prepareFields(body, bools);
-  if (!data.id) data.id = randomUUID();
-  if (!data.created_at) data.created_at = now();
+    const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+    const placeholders = Object.keys(data).map(() => '?').join(', ');
+    await query(`INSERT INTO \`${table}\` (${cols}) VALUES (${placeholders})`, Object.values(data));
 
-  const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
-  const placeholders = Object.keys(data).map(() => '?').join(', ');
-
-  await query(`INSERT INTO \`${table}\` (${cols}) VALUES (${placeholders})`, Object.values(data));
-
-  const rows = await query(`SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`, [data.id]);
-  res.status(201).json({ data: castRow(rows[0]) });
+    const rows = await query(`SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`, [data.id]);
+    res.status(201).json({ data: castRow(rows[0]) });
+  } catch (e) {
+    console.error(`insertRow ${resource}:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
 }
 
 async function updateRow(resource, id, body, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
   const bools = BOOL_FIELDS[resource] || [];
+  try {
+    const data = prepareFields(body, bools);
+    delete data.id;
+    delete data.created_at;
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
 
-  const data = prepareFields(body, bools);
-  delete data.id;
-  delete data.created_at;
-  if (Object.keys(data).length === 0) return res.status(400).json({ error: 'No fields to update' });
+    const sets = Object.keys(data).map(c => `\`${safeName(c)}\` = ?`).join(', ');
+    await query(`UPDATE \`${table}\` SET ${sets} WHERE id = ?`, [...Object.values(data), id]);
 
-  const sets = Object.keys(data).map(c => `\`${safeName(c)}\` = ?`).join(', ');
-  await query(`UPDATE \`${table}\` SET ${sets} WHERE id = ?`, [...Object.values(data), id]);
-
-  const rows = await query(`SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`, [id]);
-  if (!rows.length) return res.status(404).json({ error: 'Not found' });
-  res.json({ data: castRow(rows[0]) });
+    const rows = await query(`SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`, [id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ data: castRow(rows[0]) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 }
 
 async function deleteRow(resource, id, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
-  await query(`DELETE FROM \`${table}\` WHERE id = ?`, [id]);
-  res.json({ success: true });
+  try {
+    await query(`DELETE FROM \`${table}\` WHERE id = ?`, [id]);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 }
 
-// ─── Resource Routes ───────────────────────────────────────────────────────
+// ─── Register CRUD routes ──────────────────────────────────────────────────
 
 const CRUD_RESOURCES = [
   'firewall-policies', 'firewall-logs', 'dns-entries', 'dns-logs', 'ids-alerts',
@@ -343,17 +352,17 @@ const CRUD_RESOURCES = [
 ];
 
 for (const resource of CRUD_RESOURCES) {
-  app.get(`/api/${resource}`, (req, res) => listRows(resource, req, res));
-  app.get(`/api/${resource}/:id`, (req, res) => getRow(resource, req.params.id, res));
-  app.post(`/api/${resource}`, (req, res) => insertRow(resource, req.body, res));
-  app.patch(`/api/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
-  app.put(`/api/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
-  app.delete(`/api/${resource}/:id`, (req, res) => deleteRow(resource, req.params.id, res));
+  api.get(`/${resource}`, (req, res) => listRows(resource, req, res));
+  api.get(`/${resource}/:id`, (req, res) => getRow(resource, req.params.id, res));
+  api.post(`/${resource}`, (req, res) => insertRow(resource, req.body, res));
+  api.patch(`/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
+  api.put(`/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
+  api.delete(`/${resource}/:id`, (req, res) => deleteRow(resource, req.params.id, res));
 }
 
-// ─── Special: Batch acknowledge IDS alerts ─────────────────────────────────
+// ─── Special routes ────────────────────────────────────────────────────────
 
-app.post('/api/ids-alerts/acknowledge-many', async (req, res) => {
+api.post('/ids-alerts/acknowledge-many', async (req, res) => {
   try {
     const { ids } = req.body || {};
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids array required' });
@@ -365,9 +374,7 @@ app.post('/api/ids-alerts/acknowledge-many', async (req, res) => {
   }
 });
 
-// ─── System Settings (key-value upsert) ───────────────────────────────────
-
-app.get('/api/system-settings', async (req, res) => {
+api.get('/system-settings', async (_req, res) => {
   try {
     const rows = await query('SELECT * FROM system_settings');
     res.json({ data: castRows(rows) });
@@ -376,7 +383,7 @@ app.get('/api/system-settings', async (req, res) => {
   }
 });
 
-app.post('/api/system-settings', async (req, res) => {
+api.post('/system-settings', async (req, res) => {
   try {
     const items = Array.isArray(req.body?.items)
       ? req.body.items
@@ -398,15 +405,24 @@ app.post('/api/system-settings', async (req, res) => {
   }
 });
 
-// ─── Serve React app (SPA) ─────────────────────────────────────────────────
+// Mount the protected router
+app.use('/api', api);
 
-app.use(express.static(join(__dirname, 'dist')));
-app.get('*', (req, res) => {
-  res.sendFile(join(__dirname, 'dist', 'index.html'));
-});
+// ─── Serve React SPA ───────────────────────────────────────────────────────
+
+const distDir = join(__dirname, 'dist');
+if (existsSync(distDir)) {
+  app.use(express.static(distDir));
+  app.get('*', (_req, res) => res.sendFile(join(distDir, 'index.html')));
+} else {
+  console.warn('dist/ not found — frontend not available');
+  app.get('*', (_req, res) => res.status(503).send('Run npm run build first'));
+}
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
-  console.log(`HomeShield API + frontend running on port ${PORT}`);
+  console.log(`HomeShield running on port ${PORT}`);
+  console.log(`DB: ${process.env.DB_HOST}/${process.env.DB_NAME}`);
+  console.log(`dist/: ${existsSync(distDir) ? 'ready' : 'MISSING'}`);
 });

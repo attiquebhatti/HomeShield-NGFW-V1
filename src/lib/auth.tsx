@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { supabase } from './supabase';
+import { api, getToken } from './api';
 
 interface AuthUser {
   id: string;
@@ -21,33 +21,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        setUser({ id: session.user.id, email: session.user.email ?? '' });
-      }
+    if (!getToken()) {
       setLoading(false);
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
-      if (session?.user) {
-        setUser({ id: session.user.id, email: session.user.email ?? '' });
-      } else {
-        setUser(null);
-      }
-    });
-
-    return () => subscription.unsubscribe();
+      return;
+    }
+    api.auth.getUser()
+      .then(u => setUser(u))
+      .catch(() => setUser(null))
+      .finally(() => setLoading(false));
   }, []);
 
   async function signIn(email: string, password: string): Promise<{ error: string | null }> {
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return { error: error.message };
-    if (data.user) setUser({ id: data.user.id, email: data.user.email ?? '' });
+    const res = await api.auth.signIn(email, password);
+    if (res.error) return { error: res.error };
+    const u = (res.data as any)?.user ?? null;
+    setUser(u);
     return { error: null };
   }
 
   function signOut() {
-    supabase.auth.signOut();
+    api.auth.signOut();
     setUser(null);
   }
 

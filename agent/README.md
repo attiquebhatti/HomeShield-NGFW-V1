@@ -21,6 +21,23 @@ locks you out of the UI still gets reverted).
 The generated ruleset only ever replaces `table inet homeshield`; rules from
 Docker, libvirt, fail2ban etc. are untouched.
 
+## Telemetry and visibility
+
+Besides applying rules, the agent feeds the UI with live data:
+
+- **Firewall logs** — policies with logging enabled emit kernel log lines
+  prefixed `hs-<action>:`. The agent follows the kernel journal
+  (`journalctl -k`) with a persisted cursor (survives restarts without losing
+  or duplicating entries) and ingests matching lines into the Logs page.
+- **Sessions** — the connection table from `/proc/net/nf_conntrack` is
+  parsed and reported, populating the Sessions page. For byte/packet counters
+  enable conntrack accounting: `sysctl -w net.netfilter.nf_conntrack_acct=1`.
+- **Interfaces & health** — `ip -j addr` inventory plus CPU/RAM/disk/load
+  snapshots every `TELEMETRY_SECONDS`.
+
+The server prunes `firewall_logs`, `dns_logs` and health snapshots daily
+according to the `log_retention_days` system setting (default 90 days).
+
 ## Requirements
 
 - Linux with nftables (`nft`) and iproute2 (`ip`)

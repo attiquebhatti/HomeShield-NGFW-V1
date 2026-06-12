@@ -23,6 +23,7 @@ import { promisify } from 'node:util';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
+import { parseKernelLogLine, parseConntrack, splitJournalOutput } from './parsers.mjs';
 
 const exec = promisify(execFile);
 
@@ -208,18 +209,91 @@ async function collectHealth() {
   };
 }
 
+async function collectSessions() {
+  try {
+    const text = await readFile('/proc/net/nf_conntrack', 'utf8');
+    // Cap to keep payloads and the sessions table bounded.
+    return parseConntrack(text).slice(0, 500);
+  } catch {
+    // conntrack not available (module not loaded, or not running as root)
+    return null;
+  }
+}
+
 async function sendTelemetry() {
-  const [interfaces, health] = await Promise.all([collectInterfaces(), collectHealth()]);
+  const [interfaces, health, sessions] = await Promise.all([
+    collectInterfaces(),
+    collectHealth(),
+    collectSessions(),
+  ]);
   await api('/telemetry', {
     method: 'POST',
-    body: JSON.stringify({ interfaces, health }),
+    body: JSON.stringify({ interfaces, health, sessions }),
   });
+}
+
+// ─── Firewall log ingestion ────────────────────────────────────────────────
+// Rules compiled with logging enabled emit kernel log lines prefixed with
+// "hs-<action>: ". We follow the kernel journal with a persisted cursor so
+// no entries are lost across agent restarts.
+
+const CURSOR_FILE = join(STATE_DIR, 'journal.cursor');
+let journalCursor = null;
+let journalAvailable = true;
+
+async function loadCursor() {
+  try {
+    journalCursor = (await readFile(CURSOR_FILE, 'utf8')).trim() || null;
+  } catch {
+    journalCursor = null;
+  }
+}
+
+async function collectFirewallLogs() {
+  if (!journalAvailable) return;
+
+  const args = ['-k', '--no-pager', '--show-cursor', '-o', 'short-iso'];
+  if (journalCursor) {
+    args.push('--after-cursor', journalCursor);
+  } else {
+    args.push('--since', '-2 minutes');
+  }
+
+  let stdout;
+  try {
+    ({ stdout } = await exec('journalctl', args, { maxBuffer: 16 * 1024 * 1024 }));
+  } catch (e) {
+    if (/ENOENT/.test(e.message)) {
+      journalAvailable = false;
+      log('journalctl not found — firewall log ingestion disabled');
+      return;
+    }
+    throw e;
+  }
+
+  const { lines, cursor } = splitJournalOutput(stdout);
+  const logs = lines.map(parseKernelLogLine).filter(Boolean);
+
+  // Batch to keep request sizes sane under log floods.
+  for (let i = 0; i < logs.length; i += 500) {
+    await api('/firewall-logs', {
+      method: 'POST',
+      body: JSON.stringify({ logs: logs.slice(i, i + 500) }),
+    });
+  }
+  if (logs.length) log(`Ingested ${logs.length} firewall log entries`);
+
+  if (cursor) {
+    journalCursor = cursor;
+    await writeFile(CURSOR_FILE, cursor, 'utf8');
+  }
 }
 
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
 async function main() {
   await mkdir(STATE_DIR, { recursive: true });
+  await loadCursor();
   log(`HomeShield agent started — API ${API}, state dir ${STATE_DIR}`);
 
   let lastTelemetry = 0;
@@ -230,6 +304,12 @@ async function main() {
       if (job) await handleJob(job);
     } catch (e) {
       log('Poll error:', e.message);
+    }
+
+    try {
+      await collectFirewallLogs();
+    } catch (e) {
+      log('Log ingestion error:', e.message);
     }
 
     if (Date.now() - lastTelemetry > TELEMETRY_SECONDS * 1000) {

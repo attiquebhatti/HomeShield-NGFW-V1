@@ -587,10 +587,34 @@ agent.post('/job/:id/result', async (req, res) => {
   }
 });
 
-// Agent telemetry: replaces the interface inventory and records a health snapshot.
+// Bulk firewall log ingestion from kernel log lines (max 500 per request).
+agent.post('/firewall-logs', async (req, res) => {
+  try {
+    const logs = Array.isArray(req.body?.logs) ? req.body.logs.slice(0, 500) : [];
+    if (!logs.length) return res.json({ inserted: 0 });
+
+    const allowed = INSERTABLE_COLS['firewall-logs'];
+    let inserted = 0;
+    for (const entry of logs) {
+      const data = prepareFields(entry, [], allowed);
+      data.id = randomUUID();
+      if (!data.timestamp) data.timestamp = now();
+      const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+      const placeholders = Object.keys(data).map(() => '?').join(', ');
+      await query(`INSERT INTO firewall_logs (${cols}) VALUES (${placeholders})`, Object.values(data));
+      inserted++;
+    }
+    res.json({ inserted });
+  } catch (e) {
+    serverError(res, 'agent firewall-logs', e);
+  }
+});
+
+// Agent telemetry: replaces the interface inventory and live session list,
+// and records a health snapshot.
 agent.post('/telemetry', async (req, res) => {
   try {
-    const { interfaces, health } = req.body || {};
+    const { interfaces, health, sessions } = req.body || {};
 
     if (Array.isArray(interfaces)) {
       await query('DELETE FROM network_interfaces');
@@ -601,6 +625,20 @@ agent.post('/telemetry', async (req, res) => {
         const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
         const placeholders = Object.keys(data).map(() => '?').join(', ');
         await query(`INSERT INTO network_interfaces (${cols}) VALUES (${placeholders})`, Object.values(data));
+      }
+    }
+
+    if (Array.isArray(sessions)) {
+      await query('DELETE FROM sessions');
+      const ts = now();
+      for (const session of sessions.slice(0, 500)) {
+        const data = prepareFields(session, [], INSERTABLE_COLS['sessions']);
+        data.id = randomUUID();
+        data.started_at = data.started_at || ts;
+        data.last_seen = ts;
+        const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+        const placeholders = Object.keys(data).map(() => '?').join(', ');
+        await query(`INSERT INTO sessions (${cols}) VALUES (${placeholders})`, Object.values(data));
       }
     }
 
@@ -635,9 +673,37 @@ if (existsSync(distDir)) {
   app.get('*', (_req, res) => res.status(503).send('Run npm run build first'));
 }
 
+// ─── Log retention ─────────────────────────────────────────────────────────
+// Prunes high-volume tables per the log_retention_days system setting.
+// Audit log and apply history are kept forever.
+
+async function pruneOldLogs() {
+  try {
+    const rows = await query("SELECT value FROM system_settings WHERE `key` = 'log_retention_days'");
+    const days = Math.max(1, parseInt(rows[0]?.value, 10) || 90);
+    const tables = [
+      ['firewall_logs', 'timestamp'],
+      ['dns_logs', 'timestamp'],
+      ['system_health_snapshots', 'recorded_at'],
+    ];
+    for (const [table, col] of tables) {
+      const result = await getPool().execute(
+        `DELETE FROM \`${table}\` WHERE \`${col}\` < DATE_SUB(NOW(), INTERVAL ? DAY)`,
+        [days]
+      );
+      const affected = result[0]?.affectedRows || 0;
+      if (affected) console.log(`Retention: pruned ${affected} rows from ${table} (>${days}d)`);
+    }
+  } catch (e) {
+    console.error('Retention prune failed:', e.message);
+  }
+}
+
 // ─── Start ─────────────────────────────────────────────────────────────────
 
 autoMigrate().then(() => {
+  pruneOldLogs();
+  setInterval(pruneOldLogs, 24 * 60 * 60 * 1000);
   app.listen(PORT, () => {
     console.log(`HomeShield running on port ${PORT}`);
     console.log(`DB: ${process.env.DB_HOST}/${process.env.DB_NAME}`);

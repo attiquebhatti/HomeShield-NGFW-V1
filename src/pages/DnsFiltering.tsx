@@ -28,8 +28,8 @@ export function DnsFiltering() {
 
   async function fetchData() {
     const [enRes, logRes] = await Promise.all([
-      api.from('dns_entries').select('*').order('created_at', { ascending: false }),
-      api.from('dns_logs').select('*').order('timestamp', { ascending: false }).limit(20),
+      api.from<DnsEntry>('dns_entries').select('*').order('created_at', { ascending: false }),
+      api.from<DnsLog>('dns_logs').select('*').order('timestamp', { ascending: false }).limit(20),
     ]);
     setEntries(enRes.data ?? []);
     setLogs(logRes.data ?? []);

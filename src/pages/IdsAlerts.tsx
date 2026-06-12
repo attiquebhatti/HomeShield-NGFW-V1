@@ -32,7 +32,7 @@ export function IdsAlerts() {
 
   async function fetchAlerts() {
     const { data } = await api
-      .from('ids_alerts')
+      .from<IdsAlert>('ids_alerts')
       .select('*')
       .order('timestamp', { ascending: false })
       .limit(200);

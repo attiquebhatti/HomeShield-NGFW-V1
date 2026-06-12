@@ -10,7 +10,7 @@ import { Card, CardHeader, CardBody } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { StatusDot } from '../components/ui/StatusDot';
 import type {
-  FirewallLog, IdsAlert, NetworkInterface, Session,
+  FirewallPolicy, FirewallLog, IdsAlert, NetworkInterface, Session,
   SystemHealthSnapshot, RuleApplyHistory
 } from '../lib/database.types';
 
@@ -121,13 +121,13 @@ export function Dashboard() {
     const [
       policiesRes, logsRes, alertsRes, ifaceRes, sessRes, healthRes, historyRes
     ] = await Promise.all([
-      api.from('firewall_policies').select('id, enabled'),
-      api.from('firewall_logs').select('*').order('timestamp', { ascending: false }).limit(50),
-      api.from('ids_alerts').select('*').order('timestamp', { ascending: false }).limit(5),
-      api.from('network_interfaces').select('*'),
-      api.from('sessions').select('*').order('last_seen', { ascending: false }).limit(5),
-      api.from('system_health_snapshots').select('*').order('recorded_at', { ascending: false }).limit(10),
-      api.from('rule_apply_history').select('*').order('applied_at', { ascending: false }).limit(5),
+      api.from<Pick<FirewallPolicy, 'id' | 'enabled'>>('firewall_policies').select('id, enabled'),
+      api.from<FirewallLog>('firewall_logs').select('*').order('timestamp', { ascending: false }).limit(50),
+      api.from<IdsAlert>('ids_alerts').select('*').order('timestamp', { ascending: false }).limit(5),
+      api.from<NetworkInterface>('network_interfaces').select('*'),
+      api.from<Session>('sessions').select('*').order('last_seen', { ascending: false }).limit(5),
+      api.from<SystemHealthSnapshot>('system_health_snapshots').select('*').order('recorded_at', { ascending: false }).limit(10),
+      api.from<RuleApplyHistory>('rule_apply_history').select('*').order('applied_at', { ascending: false }).limit(5),
     ]);
 
     const policies = policiesRes.data ?? [];
@@ -147,7 +147,7 @@ export function Dashboard() {
 
     setData({
       totalPolicies: policies.length,
-      activePolicies: policies.filter((p: any) => p.enabled).length,
+      activePolicies: policies.filter(p => p.enabled).length,
       totalAllowed: allowed,
       totalBlocked: blocked,
       activeAlerts: unackAlerts,

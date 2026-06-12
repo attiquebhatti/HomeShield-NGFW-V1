@@ -1,6 +1,6 @@
 import express from 'express';
 import mysql from 'mysql2/promise';
-import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import { createHmac, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -13,14 +13,20 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
-// CORS
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+// ─── CORS ──────────────────────────────────────────────────────────────────
+// The UI is served same-origin from dist/, so CORS is disabled by default.
+// Set CORS_ORIGIN (e.g. http://localhost:5173) for the Vite dev server.
+
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
+if (CORS_ORIGIN) {
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN);
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Agent-Token');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
+    next();
+  });
+}
 
 // ─── DB ────────────────────────────────────────────────────────────────────
 
@@ -64,9 +70,20 @@ function castRow(row) {
 
 function castRows(rows) { return rows.map(castRow); }
 
+// Log full details server-side, return a generic message to the client.
+function serverError(res, context, e) {
+  console.error(`${context}:`, e);
+  res.status(500).json({ error: 'Internal server error' });
+}
+
 // ─── JWT ───────────────────────────────────────────────────────────────────
 
-const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET === 'changeme') {
+  JWT_SECRET = randomBytes(32).toString('hex');
+  console.warn('WARNING: JWT_SECRET not set — generated an ephemeral secret.');
+  console.warn('All sessions will be invalidated on restart. Set JWT_SECRET in the environment.');
+}
 
 function b64u(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
@@ -100,6 +117,33 @@ function authMiddleware(req, res, next) {
   const payload = jwtVerify(match[1]);
   if (!payload) return res.status(401).json({ error: 'Invalid or expired token' });
   req.user = payload;
+  next();
+}
+
+// ─── Rate limiting (auth endpoints) ────────────────────────────────────────
+
+const RATE_WINDOW_MS = 15 * 60 * 1000;
+const RATE_MAX_ATTEMPTS = 10;
+const rateBuckets = new Map(); // ip -> { count, windowStart }
+
+function authRateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const nowMs = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || nowMs - bucket.windowStart > RATE_WINDOW_MS) {
+    bucket = { count: 0, windowStart: nowMs };
+    rateBuckets.set(ip, bucket);
+  }
+  bucket.count++;
+  if (bucket.count > RATE_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Too many attempts. Try again later.' });
+  }
+  // Opportunistic cleanup of stale buckets
+  if (rateBuckets.size > 10000) {
+    for (const [k, v] of rateBuckets) {
+      if (nowMs - v.windowStart > RATE_WINDOW_MS) rateBuckets.delete(k);
+    }
+  }
   next();
 }
 
@@ -138,15 +182,16 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
-app.post('/api/auth/signup', async (req, res) => {
+// Signup is only open while no admin account exists (first-run setup).
+app.post('/api/auth/signup', authRateLimit, async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password || password.length < 12)
       return res.status(400).json({ error: 'Password must be at least 12 characters' });
 
-    const existing = await query('SELECT id FROM admin_users WHERE email = ? LIMIT 1', [email]);
+    const existing = await query('SELECT id FROM admin_users LIMIT 1');
     if (existing.length > 0)
-      return res.status(409).json({ error: 'An account already exists. Please sign in.' });
+      return res.status(403).json({ error: 'Signup is disabled — an admin account already exists. Please sign in.' });
 
     const passwordHash = await hash(password, 12);
     await query(
@@ -155,12 +200,11 @@ app.post('/api/auth/signup', async (req, res) => {
     );
     res.json({ message: 'Account created. Please sign in.' });
   } catch (e) {
-    console.error('signup error:', e);
-    res.status(500).json({ error: e.message });
+    serverError(res, 'signup', e);
   }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authRateLimit, async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password)
@@ -173,8 +217,7 @@ app.post('/api/auth/login', async (req, res) => {
     const user = { id: rows[0].id, email: rows[0].email };
     res.json({ token: jwtSign(user), user });
   } catch (e) {
-    console.error('login error:', e);
-    res.status(500).json({ error: e.message });
+    serverError(res, 'login', e);
   }
 });
 
@@ -249,11 +292,46 @@ const BOOL_FIELDS = {
   'backup-records': ['encrypted'],
 };
 
+// Mass-assignment protection: only these columns may be written per resource.
+// A resource missing from UPDATABLE_COLS cannot be updated at all.
+
+const INSERTABLE_COLS = {
+  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
+  'firewall-logs': ['timestamp', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'policy_id', 'policy_name', 'bytes', 'packets', 'note'],
+  'dns-entries': ['domain', 'list_type', 'category', 'source', 'enabled', 'note'],
+  'dns-logs': ['timestamp', 'domain', 'client_ip', 'action', 'matched_list', 'category', 'response_ip', 'query_type'],
+  'ids-alerts': ['timestamp', 'severity', 'signature_id', 'signature_name', 'category', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'payload_preview', 'action', 'acknowledged'],
+  'threat-feeds': ['name', 'description', 'url', 'feed_type', 'enabled', 'last_updated', 'last_status', 'indicator_count', 'refresh_interval_hours'],
+  'threat-indicators': ['feed_id', 'indicator_type', 'value', 'severity', 'description', 'expires_at'],
+  'network-interfaces': ['name', 'display_name', 'role', 'ip_address', 'netmask', 'mac_address', 'mtu', 'status', 'rx_bytes', 'tx_bytes', 'updated_at'],
+  'nat-rules': ['name', 'description', 'enabled', 'nat_type', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'translate_to_ip', 'translate_to_port', 'interface', 'priority', 'updated_at'],
+  'audit-log': ['timestamp', 'actor', 'action', 'resource_type', 'resource_id', 'details', 'ip_address'],
+  'sessions': ['started_at', 'last_seen', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'state', 'interface', 'bytes_in', 'bytes_out', 'packets_in', 'packets_out', 'application', 'policy_id'],
+  'backup-records': ['created_by', 'label', 'description', 'trigger_type', 'size_bytes', 'encrypted', 'payload', 'checksum'],
+  'rule-apply-history': ['applied_by', 'mode', 'os_target', 'rules_count', 'status', 'rollback_timer_seconds', 'rules_snapshot', 'compiled_output'],
+  'system-health': ['recorded_at', 'cpu_percent', 'ram_percent', 'ram_used_mb', 'ram_total_mb', 'disk_percent', 'disk_used_gb', 'disk_total_gb', 'load_avg_1m', 'load_avg_5m', 'load_avg_15m', 'services'],
+};
+
+const UPDATABLE_COLS = {
+  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
+  'dns-entries': ['domain', 'list_type', 'category', 'source', 'enabled', 'note'],
+  'ids-alerts': ['acknowledged'],
+  'threat-feeds': ['name', 'description', 'url', 'feed_type', 'enabled', 'last_updated', 'last_status', 'indicator_count', 'refresh_interval_hours'],
+  'network-interfaces': ['display_name', 'role', 'status', 'ip_address', 'netmask', 'mtu', 'rx_bytes', 'tx_bytes', 'updated_at'],
+  'nat-rules': ['name', 'description', 'enabled', 'nat_type', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'translate_to_ip', 'translate_to_port', 'interface', 'priority', 'updated_at'],
+  'sessions': ['last_seen', 'state', 'bytes_in', 'bytes_out', 'packets_in', 'packets_out', 'application'],
+  'rule-apply-history': ['status', 'confirmed_at', 'rolled_back_at', 'error_message'],
+};
+
+// Append-only resources that must never be deleted via the API.
+const NO_DELETE = new Set(['audit-log', 'rule-apply-history']);
+
 function safeName(name) { return name.replace(/[^a-z0-9_]/gi, ''); }
 
-function prepareFields(data, bools = []) {
+function prepareFields(data, bools = [], allowed = null) {
   const out = {};
   for (const [k, v] of Object.entries(data)) {
+    if (allowed && !allowed.includes(k)) continue;
     if (v !== null && typeof v === 'object') out[k] = JSON.stringify(v);
     else if (bools.includes(k)) out[k] = v ? 1 : 0;
     else out[k] = v;
@@ -302,8 +380,7 @@ async function listRows(resource, req, res) {
     );
     res.json({ data: castRows(rows), count: Number(total) });
   } catch (e) {
-    console.error(`listRows ${resource}:`, e.message);
-    res.status(500).json({ error: e.message });
+    serverError(res, `listRows ${resource}`, e);
   }
 }
 
@@ -315,18 +392,20 @@ async function getRow(resource, id, res) {
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ data: castRow(rows[0]) });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    serverError(res, `getRow ${resource}`, e);
   }
 }
 
 async function insertRow(resource, body, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
+  const allowed = INSERTABLE_COLS[resource];
+  if (!allowed) return res.status(403).json({ error: 'Resource is not writable' });
   const bools = BOOL_FIELDS[resource] || [];
   try {
-    const data = prepareFields(body, bools);
-    if (!data.id) data.id = randomUUID();
-    if (!data.created_at) data.created_at = now();
+    const data = prepareFields(body, bools, allowed);
+    data.id = randomUUID();
+    data.created_at = now();
 
     const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
     const placeholders = Object.keys(data).map(() => '?').join(', ');
@@ -335,20 +414,19 @@ async function insertRow(resource, body, res) {
     const rows = await query(`SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`, [data.id]);
     res.status(201).json({ data: castRow(rows[0]) });
   } catch (e) {
-    console.error(`insertRow ${resource}:`, e.message);
-    res.status(500).json({ error: e.message });
+    serverError(res, `insertRow ${resource}`, e);
   }
 }
 
 async function updateRow(resource, id, body, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
+  const allowed = UPDATABLE_COLS[resource];
+  if (!allowed) return res.status(403).json({ error: 'Resource is not updatable' });
   const bools = BOOL_FIELDS[resource] || [];
   try {
-    const data = prepareFields(body, bools);
-    delete data.id;
-    delete data.created_at;
-    if (!Object.keys(data).length) return res.status(400).json({ error: 'No fields to update' });
+    const data = prepareFields(body, bools, allowed);
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'No updatable fields provided' });
 
     const sets = Object.keys(data).map(c => `\`${safeName(c)}\` = ?`).join(', ');
     await query(`UPDATE \`${table}\` SET ${sets} WHERE id = ?`, [...Object.values(data), id]);
@@ -357,18 +435,19 @@ async function updateRow(resource, id, body, res) {
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json({ data: castRow(rows[0]) });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    serverError(res, `updateRow ${resource}`, e);
   }
 }
 
 async function deleteRow(resource, id, res) {
   const table = TABLE_MAP[resource];
   if (!table) return res.status(404).json({ error: 'Unknown resource' });
+  if (NO_DELETE.has(resource)) return res.status(403).json({ error: 'Resource is append-only' });
   try {
     await query(`DELETE FROM \`${table}\` WHERE id = ?`, [id]);
     res.json({ success: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    serverError(res, `deleteRow ${resource}`, e);
   }
 }
 
@@ -380,16 +459,7 @@ const CRUD_RESOURCES = [
   'audit-log', 'sessions', 'backup-records', 'rule-apply-history', 'system-health',
 ];
 
-for (const resource of CRUD_RESOURCES) {
-  api.get(`/${resource}`, (req, res) => listRows(resource, req, res));
-  api.get(`/${resource}/:id`, (req, res) => getRow(resource, req.params.id, res));
-  api.post(`/${resource}`, (req, res) => insertRow(resource, req.body, res));
-  api.patch(`/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
-  api.put(`/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
-  api.delete(`/${resource}/:id`, (req, res) => deleteRow(resource, req.params.id, res));
-}
-
-// ─── Special routes ────────────────────────────────────────────────────────
+// Special routes must be registered before the generic /:id routes.
 
 api.post('/ids-alerts/acknowledge-many', async (req, res) => {
   try {
@@ -399,16 +469,27 @@ api.post('/ids-alerts/acknowledge-many', async (req, res) => {
     await query(`UPDATE ids_alerts SET acknowledged = 1 WHERE id IN (${placeholders})`, ids);
     res.json({ updated: ids.length });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    serverError(res, 'acknowledge-many', e);
   }
 });
+
+for (const resource of CRUD_RESOURCES) {
+  api.get(`/${resource}`, (req, res) => listRows(resource, req, res));
+  api.get(`/${resource}/:id`, (req, res) => getRow(resource, req.params.id, res));
+  api.post(`/${resource}`, (req, res) => insertRow(resource, req.body, res));
+  api.patch(`/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
+  api.put(`/${resource}/:id`, (req, res) => updateRow(resource, req.params.id, req.body, res));
+  api.delete(`/${resource}/:id`, (req, res) => deleteRow(resource, req.params.id, res));
+}
+
+// ─── System settings ───────────────────────────────────────────────────────
 
 api.get('/system-settings', async (_req, res) => {
   try {
     const rows = await query('SELECT * FROM system_settings');
     res.json({ data: castRows(rows) });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    serverError(res, 'system-settings get', e);
   }
 });
 
@@ -430,11 +511,117 @@ api.post('/system-settings', async (req, res) => {
     const rows = await query('SELECT * FROM system_settings');
     res.json({ data: castRows(rows) });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    serverError(res, 'system-settings post', e);
   }
 });
 
-// Mount the protected router
+// ─── Agent API ─────────────────────────────────────────────────────────────
+// Used by the enforcement agent (agent/homeshield-agent.mjs). Authenticated
+// with a shared secret (AGENT_TOKEN env var) instead of a user JWT. If
+// AGENT_TOKEN is not set, these endpoints are disabled.
+
+const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
+const agent = express.Router();
+
+agent.use((req, res, next) => {
+  if (!AGENT_TOKEN) return res.status(503).json({ error: 'Agent API disabled — set AGENT_TOKEN' });
+  const token = req.headers['x-agent-token'] || '';
+  const a = Buffer.from(String(token));
+  const b = Buffer.from(AGENT_TOKEN);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return res.status(401).json({ error: 'Invalid agent token' });
+  }
+  next();
+});
+
+// Oldest pending apply job for this OS.
+agent.get('/job', async (req, res) => {
+  try {
+    const os = req.query.os === 'windows' ? 'windows' : 'linux';
+    const rows = await query(
+      `SELECT id, mode, os_target, rules_count, rollback_timer_seconds, compiled_output
+       FROM rule_apply_history WHERE status = 'pending' AND os_target = ?
+       ORDER BY applied_at ASC LIMIT 1`,
+      [os]
+    );
+    res.json({ data: rows.length ? castRow(rows[0]) : null });
+  } catch (e) {
+    serverError(res, 'agent job', e);
+  }
+});
+
+// Agent polls this while waiting for the operator to confirm.
+agent.get('/job/:id', async (req, res) => {
+  try {
+    const rows = await query(
+      'SELECT id, status, rollback_timer_seconds FROM rule_apply_history WHERE id = ? LIMIT 1',
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ data: castRow(rows[0]) });
+  } catch (e) {
+    serverError(res, 'agent job status', e);
+  }
+});
+
+// Agent reports the outcome of an apply or rollback.
+agent.post('/job/:id/result', async (req, res) => {
+  try {
+    const { status, error_message } = req.body || {};
+    if (!['applied', 'failed', 'rolled_back'].includes(status)) {
+      return res.status(400).json({ error: 'status must be applied, failed or rolled_back' });
+    }
+    const sets = { status, error_message: error_message || '' };
+    if (status === 'rolled_back') sets.rolled_back_at = now();
+    const cols = Object.keys(sets).map(c => `\`${c}\` = ?`).join(', ');
+    await query(`UPDATE rule_apply_history SET ${cols} WHERE id = ?`, [...Object.values(sets), req.params.id]);
+
+    await query(
+      'INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [randomUUID(), now(), 'agent', `apply_${status}`, 'firewall_ruleset', req.params.id,
+       JSON.stringify({ error_message: error_message || null }), req.ip || '']
+    );
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'agent job result', e);
+  }
+});
+
+// Agent telemetry: replaces the interface inventory and records a health snapshot.
+agent.post('/telemetry', async (req, res) => {
+  try {
+    const { interfaces, health } = req.body || {};
+
+    if (Array.isArray(interfaces)) {
+      await query('DELETE FROM network_interfaces');
+      for (const iface of interfaces) {
+        const data = prepareFields(iface, [], INSERTABLE_COLS['network-interfaces']);
+        data.id = randomUUID();
+        data.updated_at = now();
+        const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+        const placeholders = Object.keys(data).map(() => '?').join(', ');
+        await query(`INSERT INTO network_interfaces (${cols}) VALUES (${placeholders})`, Object.values(data));
+      }
+    }
+
+    if (health && typeof health === 'object') {
+      const data = prepareFields(health, [], INSERTABLE_COLS['system-health']);
+      data.id = randomUUID();
+      data.recorded_at = now();
+      const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+      const placeholders = Object.keys(data).map(() => '?').join(', ');
+      await query(`INSERT INTO system_health_snapshots (${cols}) VALUES (${placeholders})`, Object.values(data));
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'agent telemetry', e);
+  }
+});
+
+// Agent router must be mounted before the JWT-protected router so that
+// /api/agent/* is matched here and never hits authMiddleware.
+app.use('/api/agent', agent);
 app.use('/api', api);
 
 // ─── Serve React SPA ───────────────────────────────────────────────────────
@@ -455,5 +642,6 @@ autoMigrate().then(() => {
     console.log(`HomeShield running on port ${PORT}`);
     console.log(`DB: ${process.env.DB_HOST}/${process.env.DB_NAME}`);
     console.log(`dist/: ${existsSync(distDir) ? 'ready' : 'MISSING'}`);
+    console.log(`Agent API: ${AGENT_TOKEN ? 'enabled' : 'disabled (set AGENT_TOKEN to enable)'}`);
   });
 });

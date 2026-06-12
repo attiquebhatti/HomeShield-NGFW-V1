@@ -7,7 +7,16 @@ import type { SystemSetting } from '../lib/database.types';
 
 type SettingsMap = Record<string, string>;
 
-const groups = [
+type FieldDef = { label: string; type: string; placeholder?: string; options?: string[] };
+
+interface SettingsGroup {
+  label: string;
+  icon: typeof Server;
+  keys: string[];
+  fields: Record<string, FieldDef>;
+}
+
+const groups: SettingsGroup[] = [
   {
     label: 'System',
     icon: Server,
@@ -47,8 +56,6 @@ const groups = [
     },
   },
 ];
-
-type FieldDef = { label: string; type: string; placeholder?: string; options?: string[] };
 
 function SettingField({
   fieldDef, value, onChange,
@@ -96,7 +103,7 @@ export function Settings() {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   async function fetchSettings() {
-    const { data } = await api.from('system_settings').select('*');
+    const { data } = await api.from<SystemSetting>('system_settings').select('*');
     const map: SettingsMap = {};
     (data ?? []).forEach((s: SystemSetting) => { map[s.key] = s.value; });
     setSettings(map);
@@ -155,7 +162,7 @@ export function Settings() {
             </CardHeader>
             <CardBody className="space-y-4">
               {group.keys.map(key => {
-                const field = (group.fields as Record<string, FieldDef>)[key];
+                const field = group.fields[key];
                 if (!field) return null;
                 return (
                   <div key={key}>

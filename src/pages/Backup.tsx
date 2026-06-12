@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Download, Upload, Trash2, Shield, CheckCircle2, AlertTriangle,
-  Clock, Database, Lock, RefreshCw, FileJson
+  Database, Lock, RefreshCw, FileJson
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card, CardHeader, CardBody } from '../components/ui/Card';
@@ -47,7 +47,7 @@ export function Backup() {
 
   async function fetchRecords() {
     const { data } = await api
-      .from('backup_records')
+      .from<BackupRecord>('backup_records')
       .select('*')
       .order('created_at', { ascending: false });
     setRecords(data ?? []);

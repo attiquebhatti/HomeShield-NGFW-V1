@@ -27,7 +27,7 @@ export function Sessions() {
 
   async function fetchSessions() {
     setLoading(true);
-    const { data } = await api.from('sessions').select('*').order('last_seen', { ascending: false }).limit(100);
+    const { data } = await api.from<Session>('sessions').select('*').order('last_seen', { ascending: false }).limit(100);
     setSessions(data ?? []);
     setLoading(false);
   }

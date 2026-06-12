@@ -38,7 +38,7 @@ export function ThreatFeeds() {
   const [form, setForm] = useState<typeof empty>(empty);
 
   async function fetchFeeds() {
-    const { data } = await api.from('threat_feeds').select('*').order('created_at', { ascending: false });
+    const { data } = await api.from<ThreatFeed>('threat_feeds').select('*').order('created_at', { ascending: false });
     setFeeds(data ?? []);
     setLoading(false);
   }

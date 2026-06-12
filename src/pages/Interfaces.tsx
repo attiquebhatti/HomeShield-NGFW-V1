@@ -31,7 +31,7 @@ export function Interfaces() {
   const [saving, setSaving] = useState(false);
 
   async function fetchIfaces() {
-    const { data } = await api.from('network_interfaces').select('*').order('name');
+    const { data } = await api.from<NetworkInterface>('network_interfaces').select('*').order('name');
     setIfaces(data ?? []);
     setLoading(false);
   }

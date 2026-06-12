@@ -109,7 +109,6 @@ class Query<T> {
   private _orderDir: 'asc' | 'desc' = 'asc';
   private _rangeFrom?: number;
   private _rangeTo?: number;
-  private _countExact = false;
 
   constructor(resource: string) {
     this.resource = resource;
@@ -122,7 +121,7 @@ class Query<T> {
 
   in(_col: string, _vals: string[]) { return this; }
 
-  ilike(col: string, pattern: string) {
+  ilike(_col: string, pattern: string) {
     this.params['search'] = pattern.replace(/%/g, '');
     return this;
   }
@@ -150,8 +149,7 @@ class Query<T> {
     return this;
   }
 
-  select(_cols: string, opts?: { count?: string }) {
-    if (opts?.count === 'exact') this._countExact = true;
+  select(_cols: string, _opts?: { count?: string }) {
     return this;
   }
 

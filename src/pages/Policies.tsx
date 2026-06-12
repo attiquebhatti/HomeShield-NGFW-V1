@@ -219,7 +219,7 @@ export function Policies() {
 
   async function fetchPolicies() {
     const { data } = await api
-      .from('firewall_policies')
+      .from<FirewallPolicy>('firewall_policies')
       .select('*')
       .order('priority', { ascending: true });
     setPolicies(data ?? []);
@@ -286,7 +286,9 @@ export function Policies() {
       mode: 'host',
       os_target: osTarget,
       rules_count: policies.filter(p => p.enabled).length,
-      status: 'applied',
+      // The enforcement agent picks up 'pending' jobs, applies the ruleset on
+      // the target machine, and transitions the status to applied/failed.
+      status: 'pending',
       rollback_timer_seconds: ROLLBACK_SECONDS,
       compiled_output: compiledOutput,
       rules_snapshot: policies,
@@ -300,7 +302,7 @@ export function Policies() {
       ip_address: '127.0.0.1',
     });
 
-    const applyId = record?.id ?? null;
+    const applyId = typeof record?.id === 'string' ? record.id : null;
     let remaining = ROLLBACK_SECONDS;
     setApplyState(s => ({ ...s, status: 'confirming', countdown: remaining, applyId }));
 

@@ -38,7 +38,7 @@ export function Logs() {
 
   const fetchLogs = useCallback(async () => {
     let query = api
-      .from('firewall_logs')
+      .from<FirewallLog>('firewall_logs')
       .select('*', { count: 'exact' })
       .order('timestamp', { ascending: false })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);

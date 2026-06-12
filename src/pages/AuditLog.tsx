@@ -27,7 +27,7 @@ export function AuditLog() {
 
   const fetchEntries = useCallback(async () => {
     let query = api
-      .from('audit_log')
+      .from<AuditEntry>('audit_log')
       .select('*', { count: 'exact' })
       .order('timestamp', { ascending: false })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);

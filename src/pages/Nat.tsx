@@ -52,7 +52,7 @@ export function Nat() {
   const [editTarget, setEditTarget] = useState<NatRule | null>(null);
   const [form, setForm] = useState<typeof emptyRule>(emptyRule);
 
-  async function fetchRules() { const { data } = await api.from('nat_rules').select('*').order('priority'); setRules(data ?? []); setLoading(false); }
+  async function fetchRules() { const { data } = await api.from<NatRule>('nat_rules').select('*').order('priority'); setRules(data ?? []); setLoading(false); }
   useEffect(() => { fetchRules(); }, []);
 
   function openCreate() { setEditTarget(null); setForm(emptyRule); setModalOpen(true); }

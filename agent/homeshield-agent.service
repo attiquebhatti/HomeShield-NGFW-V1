@@ -1,0 +1,24 @@
+[Unit]
+Description=HomeShield NGFW enforcement agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust the path to wherever the agent is installed
+ExecStart=/usr/bin/node /opt/homeshield/agent/homeshield-agent.mjs
+Environment=HOMESHIELD_API=http://127.0.0.1:3000
+# Set the shared secret in an env file kept out of the unit (chmod 600):
+EnvironmentFile=/etc/homeshield/agent.env
+Restart=always
+RestartSec=5
+User=root
+
+# Hardening (the agent needs CAP_NET_ADMIN for nftables)
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadWritePaths=/var/lib/homeshield
+
+[Install]
+WantedBy=multi-user.target

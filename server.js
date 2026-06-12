@@ -610,6 +610,53 @@ agent.post('/firewall-logs', async (req, res) => {
   }
 });
 
+// DNS filtering config for the agent's proxy: enabled flag, upstream
+// resolver, and all enabled block/allow entries.
+agent.get('/dns-config', async (_req, res) => {
+  try {
+    const settings = await query(
+      "SELECT `key`, value FROM system_settings WHERE `key` IN ('dns_filtering_enabled', 'dns_upstream')"
+    );
+    const map = Object.fromEntries(settings.map(r => [r.key, r.value]));
+    const entries = await query(
+      'SELECT domain, list_type, category FROM dns_entries WHERE enabled = 1'
+    );
+    res.json({
+      data: {
+        enabled: map.dns_filtering_enabled === 'true',
+        upstream: map.dns_upstream || '1.1.1.1',
+        entries: castRows(entries),
+      },
+    });
+  } catch (e) {
+    serverError(res, 'agent dns-config', e);
+  }
+});
+
+// Bulk DNS query log ingestion (max 500 per request).
+agent.post('/dns-logs', async (req, res) => {
+  try {
+    const logs = Array.isArray(req.body?.logs) ? req.body.logs.slice(0, 500) : [];
+    if (!logs.length) return res.json({ inserted: 0 });
+
+    const allowed = INSERTABLE_COLS['dns-logs'];
+    let inserted = 0;
+    for (const entry of logs) {
+      const data = prepareFields(entry, [], allowed);
+      if (!data.domain || !['allowed', 'blocked'].includes(data.action)) continue;
+      data.id = randomUUID();
+      if (!data.timestamp) data.timestamp = now();
+      const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+      const placeholders = Object.keys(data).map(() => '?').join(', ');
+      await query(`INSERT INTO dns_logs (${cols}) VALUES (${placeholders})`, Object.values(data));
+      inserted++;
+    }
+    res.json({ inserted });
+  } catch (e) {
+    serverError(res, 'agent dns-logs', e);
+  }
+});
+
 // Agent telemetry: replaces the interface inventory and live session list,
 // and records a health snapshot.
 agent.post('/telemetry', async (req, res) => {
@@ -673,6 +720,24 @@ if (existsSync(distDir)) {
   app.get('*', (_req, res) => res.status(503).send('Run npm run build first'));
 }
 
+// Inserts any missing default settings on existing databases (auto-migrate
+// only runs the full schema on first install).
+async function ensureDefaultSettings() {
+  const defaults = [
+    ['dns_upstream', '1.1.1.1', 'Upstream DNS resolver for the filtering proxy'],
+  ];
+  try {
+    for (const [key, value, description] of defaults) {
+      await query(
+        'INSERT IGNORE INTO system_settings (`key`, value, description, updated_at) VALUES (?, ?, ?, ?)',
+        [key, value, description, now()]
+      );
+    }
+  } catch (e) {
+    console.error('ensureDefaultSettings failed:', e.message);
+  }
+}
+
 // ─── Log retention ─────────────────────────────────────────────────────────
 // Prunes high-volume tables per the log_retention_days system setting.
 // Audit log and apply history are kept forever.
@@ -702,6 +767,7 @@ async function pruneOldLogs() {
 // ─── Start ─────────────────────────────────────────────────────────────────
 
 autoMigrate().then(() => {
+  ensureDefaultSettings();
   pruneOldLogs();
   setInterval(pruneOldLogs, 24 * 60 * 60 * 1000);
   app.listen(PORT, () => {

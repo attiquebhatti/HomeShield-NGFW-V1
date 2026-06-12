@@ -38,6 +38,36 @@ Besides applying rules, the agent feeds the UI with live data:
 The server prunes `firewall_logs`, `dns_logs` and health snapshots daily
 according to the `log_retention_days` system setting (default 90 days).
 
+## DNS filtering
+
+The agent includes a UDP DNS proxy, toggled by the **DNS Filtering** switch in
+Settings (no agent restart needed — it picks up the change within
+`DNS_REFRESH_SECONDS`). When enabled it listens on udp/53:
+
+- Domains on the blocklist (DNS Filtering page) are sinkholed: A → `0.0.0.0`,
+  AAAA → `::`, other types → NXDOMAIN. Entries match the domain itself and all
+  subdomains; allowlist entries override blocklist entries.
+- Everything else is forwarded to the upstream resolver (`dns_upstream`
+  setting, default `1.1.1.1`).
+- Every query is logged to the DNS Logs page with client IP, verdict and
+  matched list entry.
+
+To actually use it, point clients at the agent machine for DNS — either per
+device, via your router's DHCP DNS option, or in gateway mode with a DNAT rule
+redirecting port 53.
+
+**Port 53 conflicts:** on distros with systemd-resolved, free the port first:
+
+```sh
+sudo mkdir -p /etc/systemd/resolved.conf.d
+printf '[Resolve]\nDNSStubListener=no\n' | sudo tee /etc/systemd/resolved.conf.d/homeshield.conf
+sudo systemctl restart systemd-resolved
+```
+
+Limitations (current iteration): UDP only (no DNS-over-TCP fallback), IPv4
+listener only, and the proxy is an open resolver on all interfaces — run it on
+a trusted LAN and block udp/53 from WAN with a firewall policy.
+
 ## Requirements
 
 - Linux with nftables (`nft`) and iproute2 (`ip`)
@@ -88,3 +118,5 @@ wrong, the rollback timer will restore the previous ruleset automatically.
 | `STATE_DIR` | `/var/lib/homeshield` | Ruleset backups and apply files |
 | `POLL_SECONDS` | `5` | Job poll interval |
 | `TELEMETRY_SECONDS` | `60` | Interface/health reporting interval |
+| `DNS_PORT` | `53` | DNS proxy listen port |
+| `DNS_REFRESH_SECONDS` | `30` | How often DNS config/blocklists are re-fetched |

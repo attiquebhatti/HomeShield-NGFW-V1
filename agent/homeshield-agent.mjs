@@ -23,7 +23,9 @@ import { promisify } from 'node:util';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
+import dgram from 'node:dgram';
 import { parseKernelLogLine, parseConntrack, splitJournalOutput } from './parsers.mjs';
+import { parseQuery, buildBlockResponse, createMatcher, sinkholeAddress } from './dns.mjs';
 
 const exec = promisify(execFile);
 
@@ -289,6 +291,100 @@ async function collectFirewallLogs() {
   }
 }
 
+// ─── DNS filtering proxy ───────────────────────────────────────────────────
+// A UDP DNS proxy controlled by the dns_filtering_enabled system setting.
+// Blocked domains are sinkholed (0.0.0.0 / :: / NXDOMAIN); everything else
+// is forwarded to the upstream resolver. Query logs are batched to the API.
+
+const DNS_PORT = parseInt(process.env.DNS_PORT || '53', 10);
+const DNS_REFRESH_SECONDS = parseInt(process.env.DNS_REFRESH_SECONDS || '30', 10);
+
+let dnsSocket = null;
+let dnsMatcher = createMatcher([]);
+let dnsUpstream = '1.1.1.1';
+let dnsLogBuffer = [];
+
+function pushDnsLog(entry) {
+  dnsLogBuffer.push(entry);
+  if (dnsLogBuffer.length > 5000) dnsLogBuffer = dnsLogBuffer.slice(-5000);
+}
+
+function forwardDnsQuery(msg, rinfo) {
+  const upstreamSocket = dgram.createSocket('udp4');
+  const timer = setTimeout(() => upstreamSocket.close(), 5000);
+  upstreamSocket.on('message', (response) => {
+    clearTimeout(timer);
+    upstreamSocket.close();
+    if (dnsSocket) dnsSocket.send(response, rinfo.port, rinfo.address);
+  });
+  upstreamSocket.on('error', () => {
+    clearTimeout(timer);
+    try { upstreamSocket.close(); } catch {}
+  });
+  upstreamSocket.send(msg, 53, dnsUpstream);
+}
+
+function handleDnsQuery(msg, rinfo) {
+  const parsed = parseQuery(msg);
+  if (!parsed) {
+    forwardDnsQuery(msg, rinfo); // not something we understand — pass through
+    return;
+  }
+
+  const verdict = dnsMatcher(parsed.domain);
+  if (verdict.action === 'blocked') {
+    dnsSocket.send(buildBlockResponse(msg, parsed), rinfo.port, rinfo.address);
+  } else {
+    forwardDnsQuery(msg, rinfo);
+  }
+
+  pushDnsLog({
+    domain: parsed.domain,
+    client_ip: rinfo.address,
+    action: verdict.action,
+    matched_list: verdict.matched_list,
+    category: verdict.category,
+    response_ip: verdict.action === 'blocked' ? sinkholeAddress(parsed.qtype) : '',
+    query_type: parsed.qtypeName,
+  });
+}
+
+function startDnsProxy() {
+  if (dnsSocket) return;
+  const socket = dgram.createSocket('udp4');
+  socket.on('message', handleDnsQuery);
+  socket.on('error', (e) => {
+    log('DNS proxy error:', e.message);
+    try { socket.close(); } catch {}
+    if (dnsSocket === socket) dnsSocket = null;
+  });
+  socket.bind(DNS_PORT, () => log(`DNS filtering proxy listening on udp/${DNS_PORT} (upstream ${dnsUpstream})`));
+  dnsSocket = socket;
+}
+
+function stopDnsProxy() {
+  if (!dnsSocket) return;
+  try { dnsSocket.close(); } catch {}
+  dnsSocket = null;
+  log('DNS filtering proxy stopped');
+}
+
+async function refreshDnsConfig() {
+  const config = await api('/dns-config');
+  dnsUpstream = config.upstream || '1.1.1.1';
+  dnsMatcher = createMatcher(config.entries || []);
+  if (config.enabled && !dnsSocket) startDnsProxy();
+  if (!config.enabled && dnsSocket) stopDnsProxy();
+}
+
+async function flushDnsLogs() {
+  while (dnsLogBuffer.length) {
+    const batch = dnsLogBuffer.slice(0, 500);
+    await api('/dns-logs', { method: 'POST', body: JSON.stringify({ logs: batch }) });
+    dnsLogBuffer = dnsLogBuffer.slice(batch.length);
+  }
+}
+
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
 async function main() {
@@ -297,6 +393,7 @@ async function main() {
   log(`HomeShield agent started — API ${API}, state dir ${STATE_DIR}`);
 
   let lastTelemetry = 0;
+  let lastDnsRefresh = 0;
 
   for (;;) {
     try {
@@ -310,6 +407,21 @@ async function main() {
       await collectFirewallLogs();
     } catch (e) {
       log('Log ingestion error:', e.message);
+    }
+
+    if (Date.now() - lastDnsRefresh > DNS_REFRESH_SECONDS * 1000) {
+      try {
+        await refreshDnsConfig();
+        lastDnsRefresh = Date.now();
+      } catch (e) {
+        log('DNS config refresh error:', e.message);
+      }
+    }
+
+    try {
+      await flushDnsLogs();
+    } catch (e) {
+      log('DNS log flush error:', e.message);
     }
 
     if (Date.now() - lastTelemetry > TELEMETRY_SECONDS * 1000) {

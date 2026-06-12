@@ -39,10 +39,11 @@ const groups: SettingsGroup[] = [
   {
     label: 'Security',
     icon: Shield,
-    keys: ['rollback_timer_seconds', 'dns_filtering_enabled', 'ids_enabled'],
+    keys: ['rollback_timer_seconds', 'dns_filtering_enabled', 'dns_upstream', 'ids_enabled'],
     fields: {
       rollback_timer_seconds: { label: 'Rollback Timer (seconds)', type: 'number', placeholder: '30' },
       dns_filtering_enabled: { label: 'DNS Filtering', type: 'boolean' },
+      dns_upstream: { label: 'Upstream DNS Resolver', type: 'text', placeholder: '1.1.1.1' },
       ids_enabled: { label: 'IDS Engine', type: 'boolean' },
     },
   },

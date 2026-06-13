@@ -44,9 +44,10 @@ The agent includes a UDP DNS proxy, toggled by the **DNS Filtering** switch in
 Settings (no agent restart needed — it picks up the change within
 `DNS_REFRESH_SECONDS`). When enabled it listens on udp/53:
 
-- Domains on the blocklist (DNS Filtering page) are sinkholed: A → `0.0.0.0`,
-  AAAA → `::`, other types → NXDOMAIN. Entries match the domain itself and all
-  subdomains; allowlist entries override blocklist entries.
+- Domains on the blocklist (DNS Filtering page, plus domain indicators from
+  enabled threat feeds) are sinkholed: A → `0.0.0.0`, AAAA → `::`, other types
+  → NXDOMAIN. Entries match the domain itself and all subdomains; allowlist
+  entries override blocklist entries.
 - Everything else is forwarded to the upstream resolver (`dns_upstream`
   setting, default `1.1.1.1`).
 - Every query is logged to the DNS Logs page with client IP, verdict and
@@ -129,10 +130,13 @@ them into an nftables set (`table inet homeshield_threats`):
   are visible via `sudo nft list table inet homeshield_threats`.
 - Self-healing: re-asserted each cycle, so it survives a policy rollback.
 
-Only `ip`/`cidr` indicators feed the nftables set. Domain and hash indicators
-are stored and counted but not yet enforced (domain feeds → DNS sinkhole is a
-planned follow-up). Good starter feeds: abuse.ch Feodo Tracker, Emerging
-Threats compromised IPs, Spamhaus DROP.
+`ip`/`cidr` indicators feed the nftables set above. **Domain** indicators from
+enabled feeds are automatically added to the DNS sinkhole blocklist (see DNS
+filtering) — so a domain-based threat feed blocks those domains at resolution
+time, while your explicit DNS allowlist entries still take precedence. Hash
+indicators are stored and counted but not yet enforced. Good starter feeds:
+abuse.ch Feodo Tracker / URLhaus, Emerging Threats compromised IPs,
+Spamhaus DROP.
 
 ## WireGuard VPN
 

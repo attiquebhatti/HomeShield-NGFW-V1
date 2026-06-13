@@ -779,11 +779,23 @@ agent.get('/dns-config', async (_req, res) => {
     const entries = await query(
       'SELECT domain, list_type, category FROM dns_entries WHERE enabled = 1'
     );
+    // Domain indicators from enabled threat feeds also become blocklist
+    // entries. User allowlist entries in dns_entries still win (the matcher
+    // gives allowlist precedence), so this can't override an explicit allow.
+    const threatDomains = await query(
+      `SELECT ti.value AS domain, 'blocklist' AS list_type,
+              CONCAT('threat:', COALESCE(tf.name, 'feed')) AS category
+       FROM threat_indicators ti
+       JOIN threat_feeds tf ON tf.id = ti.feed_id
+       WHERE tf.enabled = 1 AND ti.indicator_type = 'domain'
+         AND (ti.expires_at IS NULL OR ti.expires_at > NOW())
+       LIMIT 200000`
+    );
     res.json({
       data: {
         enabled: map.dns_filtering_enabled === 'true',
         upstream: map.dns_upstream || '1.1.1.1',
-        entries: castRows(entries),
+        entries: [...castRows(entries), ...castRows(threatDomains)],
       },
     });
   } catch (e) {

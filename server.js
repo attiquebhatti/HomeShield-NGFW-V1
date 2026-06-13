@@ -12,7 +12,7 @@ import { buildEnvelope, readEnvelope, sha256 } from './backup.mjs';
 import { generateSecret, verifyTOTP, otpauthURL } from './totp.mjs';
 import { renderPrometheus, groupSamples } from './metrics.mjs';
 import { buildWindowsInstaller } from './ipsec.mjs';
-import { buildWindowsBootstrap } from './bootstrap.mjs';
+import { buildWindowsBootstrap, buildWindowsCmd } from './bootstrap.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -872,6 +872,26 @@ api.get('/agent-download/windows', (req, res) => {
     res.send(bootstrap);
   } catch (e) {
     serverError(res, 'agent-download windows', e);
+  }
+});
+
+// One-click, self-elevating .cmd installer with the token baked in.
+// Admin-only because it embeds the agent token. Requires AGENT_TOKEN.
+api.get('/agent-download/windows-cmd', (req, res) => {
+  try {
+    if ((req.user.role || 'admin') !== 'admin') return res.status(403).json({ error: 'Admin role required' });
+    if (!AGENT_TOKEN) return res.status(409).json({ error: 'Set AGENT_TOKEN on the server first' });
+    const scriptPath = join(__dirname, 'agent-windows', 'homeshield-agent.ps1');
+    if (!existsSync(scriptPath)) return res.status(404).json({ error: 'Windows agent not bundled with this build' });
+    const agentScript = readFileSync(scriptPath, 'utf8');
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+    const host = req.get('host') || '';
+    const cmd = buildWindowsCmd(agentScript, host ? `${proto}://${host}` : '', AGENT_TOKEN);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="homeshield-install.cmd"');
+    res.send(cmd);
+  } catch (e) {
+    serverError(res, 'agent-download windows-cmd', e);
   }
 });
 

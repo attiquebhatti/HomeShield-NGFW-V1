@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildWindowsBootstrap } from './bootstrap.mjs';
+import { buildWindowsBootstrap, buildWindowsCmd } from './bootstrap.mjs';
 
 describe('buildWindowsBootstrap', () => {
   const agent = 'Write-Host "I am the agent"';
@@ -29,5 +29,36 @@ describe('buildWindowsBootstrap', () => {
 
   it('handles an empty default API', () => {
     expect(buildWindowsBootstrap(agent, '')).toContain('$Api = ""');
+  });
+});
+
+describe('buildWindowsCmd', () => {
+  const agent = 'Write-Host "agent body"';
+  const out = buildWindowsCmd(agent, 'https://shield.example.com', 'secrettoken');
+
+  it('is a self-elevating batch file', () => {
+    expect(out.startsWith('@echo off')).toBe(true);
+    expect(out).toContain('net session >nul 2>&1');
+    expect(out).toContain('Start-Process -Verb RunAs');
+    expect(out).toContain('exit /b');
+  });
+
+  it('bakes in the API and token and embeds the agent', () => {
+    expect(out).toContain("$Api = 'https://shield.example.com'");
+    expect(out).toContain("$Token = 'secrettoken'");
+    expect(out).toContain(Buffer.from(agent, 'utf8').toString('base64'));
+  });
+
+  it('runs the payload after the marker via LastIndexOf (not the marker in the command)', () => {
+    expect(out).toContain("$c.LastIndexOf('#PSPAYLOAD#')");
+    // the literal marker line appears exactly once as a delimiter (plus once inside the command)
+    const markerLines = out.split('\r\n').filter(l => l === '#PSPAYLOAD#');
+    expect(markerLines.length).toBe(1);
+    expect(out).toContain('Register-ScheduledTask -TaskName "HomeShieldAgent"');
+  });
+
+  it('uses CRLF line endings and escapes single quotes', () => {
+    expect(out).toContain('\r\n');
+    expect(buildWindowsCmd(agent, "a'b", "t'k")).toContain("$Token = 't''k'");
   });
 });

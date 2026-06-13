@@ -52,3 +52,51 @@ export function buildWindowsBootstrap(agentScript, defaultApi = '') {
     '',
   ].join('\n');
 }
+
+/**
+ * Builds a one-click, self-elevating .cmd installer with the API URL and token
+ * baked in. The user double-clicks it and approves the UAC prompt — no
+ * execution-policy fiddling, no signing. The PowerShell payload is appended
+ * after a marker and run from the file itself (so there's no command-line
+ * length limit on the embedded agent).
+ *
+ * NOTE: embeds the agent token, so this download is admin-only.
+ */
+export function buildWindowsCmd(agentScript, api, token) {
+  const b64 = Buffer.from(agentScript || '', 'utf8').toString('base64');
+  const apiLit = String(api || '').replace(/'/g, "''");
+  const tokenLit = String(token || '').replace(/'/g, "''");
+
+  const lines = [
+    '@echo off',
+    'rem HomeShield NGFW - one-click Windows agent installer',
+    'net session >nul 2>&1',
+    'if %errorlevel% neq 0 (',
+    "  powershell -NoProfile -Command \"Start-Process -Verb RunAs -FilePath '%~f0'\"",
+    '  exit /b',
+    ')',
+    'powershell -NoProfile -ExecutionPolicy Bypass -Command "$c=[IO.File]::ReadAllText(\'%~f0\'); $m=$c.LastIndexOf(\'#PSPAYLOAD#\'); Invoke-Expression $c.Substring($m+11)"',
+    'exit /b',
+    '#PSPAYLOAD#',
+    `$Api = '${apiLit}'`,
+    `$Token = '${tokenLit}'`,
+    `$agentB64 = '${b64}'`,
+    '$Dir = "$env:ProgramData\\HomeShield"',
+    'New-Item -ItemType Directory -Force -Path $Dir | Out-Null',
+    '[IO.File]::WriteAllBytes((Join-Path $Dir "homeshield-agent.ps1"), [Convert]::FromBase64String($agentB64))',
+    '@{ api = $Api; token = $Token; poll_seconds = 15 } | ConvertTo-Json | Set-Content -Path (Join-Path $Dir "agent.json") -Encoding UTF8',
+    'try { icacls $Dir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" | Out-Null } catch {}',
+    '$agentPath = Join-Path $Dir "homeshield-agent.ps1"',
+    '$arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"" + $agentPath + "`""',
+    '$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg',
+    '$trigger = New-ScheduledTaskTrigger -AtStartup',
+    '$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest',
+    '$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew',
+    'Register-ScheduledTask -TaskName "HomeShieldAgent" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null',
+    'Start-ScheduledTask -TaskName "HomeShieldAgent"',
+    'Write-Host "HomeShield agent installed and started." -ForegroundColor Green',
+    'Write-Host "Logs: $Dir\\agent.log"',
+    'Start-Sleep -Seconds 4',
+  ];
+  return lines.join('\r\n');
+}

@@ -156,26 +156,42 @@ export function Devices() {
               <Monitor className="w-4 h-4 text-info" /> Windows
             </div>
             <p className="text-xs text-text-muted">
-              Download the installer, then run it from an <strong>elevated</strong> PowerShell. It enrolls the
-              device, enforces firewall policy, and sets up the IPSec VPN client.
+              Enrolls the device, enforces firewall policy, and sets up the IPSec VPN client.
             </p>
-            <Button variant="primary" onClick={() => api.download('agent-download/windows', 'homeshield-install.ps1')}>
-              <Download className="w-4 h-4" /> Download Windows Installer (.ps1)
+            {/* One-click .cmd (token + URL baked in, self-elevates) */}
+            <Button variant="primary" disabled={!agentToken}
+              title={agentToken ? 'One-click installer' : 'Set AGENT_TOKEN on the server first'}
+              onClick={() => api.download('agent-download/windows-cmd', 'homeshield-install.cmd')}>
+              <Download className="w-4 h-4" /> Download One-Click Installer (.cmd)
             </Button>
-            <div className="text-xs text-text-muted mt-1">
-              Open PowerShell <strong>as Administrator</strong>, <code className="font-mono">cd</code> to the download
-              folder, then run (the server URL and token are pre-filled):
-            </div>
-            <div className="relative">
-              <code className="block px-3 py-2 pr-10 bg-brand-main rounded-lg text-xs font-mono text-success break-all">{installCmd}</code>
-              <button onClick={copyCmd} title="Copy"
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-brand-slate transition-colors">
-                {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
-              </button>
-            </div>
-            {agentToken
-              ? <p className="text-xs text-text-muted/70">The <code className="font-mono">-ExecutionPolicy Bypass</code> clears the unsigned-script block on the downloaded file.</p>
-              : <p className="text-xs text-warning">No <code className="font-mono">AGENT_TOKEN</code> is set on the server, so the command shows a placeholder. Set one in the server environment and restart first.</p>}
+            <p className="text-xs text-text-muted/70">
+              Double-click the downloaded file and approve the <strong>UAC</strong> prompt — no PowerShell or
+              execution-policy steps. The server URL and token are baked in.
+            </p>
+            {!agentToken && (
+              <p className="text-xs text-warning">
+                No <code className="font-mono">AGENT_TOKEN</code> is set on the server — set one in the server
+                environment and restart before downloading.
+              </p>
+            )}
+
+            {/* Advanced: raw .ps1 + manual command */}
+            <details className="text-xs text-text-muted/80 pt-1">
+              <summary className="cursor-pointer">Advanced: PowerShell installer</summary>
+              <div className="mt-2 space-y-2">
+                <Button variant="secondary" size="sm" onClick={() => api.download('agent-download/windows', 'homeshield-install.ps1')}>
+                  <Download className="w-3.5 h-3.5" /> Download .ps1
+                </Button>
+                <div>Run from an <strong>elevated</strong> PowerShell:</div>
+                <div className="relative">
+                  <code className="block px-3 py-2 pr-10 bg-brand-main rounded-lg font-mono text-success break-all">{installCmd}</code>
+                  <button onClick={copyCmd} title="Copy"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-brand-slate transition-colors">
+                    {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+            </details>
           </div>
 
           {/* Linux */}

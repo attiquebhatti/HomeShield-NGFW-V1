@@ -49,11 +49,12 @@ const groups: SettingsGroup[] = [
   {
     label: 'Intrusion Prevention',
     icon: ShieldAlert,
-    keys: ['ips_mode', 'suricata_queue_num', 'suricata_eve_path'],
+    keys: ['ips_mode', 'suricata_queue_num', 'suricata_eve_path', 'appid_enabled'],
     fields: {
       ips_mode: { label: 'Suricata Mode', type: 'select', options: ['off', 'ids', 'ips'] },
       suricata_queue_num: { label: 'NFQUEUE Number (IPS)', type: 'number', placeholder: '0' },
       suricata_eve_path: { label: 'Suricata eve.json Path', type: 'text', placeholder: '/var/log/suricata/eve.json' },
+      appid_enabled: { label: 'Application Identification', type: 'boolean' },
     },
   },
   {

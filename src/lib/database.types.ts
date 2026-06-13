@@ -287,6 +287,29 @@ export interface RuleApplyHistory {
   compiled_output: string;
 }
 
+export interface AppFlow {
+  id: string;
+  timestamp: string;
+  client_ip: string | null;
+  dest_ip: string | null;
+  application: string;
+  category: string;
+  hostname: string;
+  protocol: string;
+  app_proto: string;
+  source: string;
+  bytes: number;
+}
+
+export interface AppStat {
+  application: string;
+  category: string;
+  flows: number;
+  bytes: number;
+  clients: number;
+  last_seen: string;
+}
+
 export interface VpnServer {
   id: string;
   interface: string;

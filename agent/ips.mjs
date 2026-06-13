@@ -33,21 +33,29 @@ function toMysqlTimestamp(iso) {
   return d.toISOString().slice(0, 19).replace('T', ' ');
 }
 
+/** Parses an eve.json line to an object, or null if it isn't JSON. */
+export function parseEveLine(line) {
+  const trimmed = String(line).trim();
+  if (!trimmed || trimmed[0] !== '{') return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Parses one line of Suricata eve.json into an ids_alerts row.
  * Returns null for non-JSON lines and any event_type other than "alert".
  */
 export function parseEveAlert(line) {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed[0] !== '{') return null;
+  const event = parseEveLine(line);
+  return event ? mapAlertEvent(event) : null;
+}
 
-  let event;
-  try {
-    event = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-  if (event.event_type !== 'alert' || !event.alert) return null;
+/** Maps a parsed eve "alert" event to an ids_alerts row, or null. */
+export function mapAlertEvent(event) {
+  if (!event || event.event_type !== 'alert' || !event.alert) return null;
 
   const a = event.alert;
   const payload = event.payload_printable || '';

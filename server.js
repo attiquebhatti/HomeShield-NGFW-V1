@@ -250,6 +250,7 @@ const TABLE_MAP = {
   'backup-records': 'backup_records',
   'rule-apply-history': 'rule_apply_history',
   'system-health': 'system_health_snapshots',
+  'app-flows': 'app_flows',
 };
 
 const ORDER_MAP = {
@@ -266,6 +267,7 @@ const ORDER_MAP = {
   'backup-records': { col: 'created_at', dir: 'DESC' },
   'rule-apply-history': { col: 'applied_at', dir: 'DESC' },
   'system-health': { col: 'recorded_at', dir: 'DESC' },
+  'app-flows': { col: 'timestamp', dir: 'DESC' },
 };
 
 const SEARCH_COLS = {
@@ -276,6 +278,7 @@ const SEARCH_COLS = {
   'ids-alerts': ['signature_name', 'src_ip', 'dst_ip'],
   'audit-log': ['actor', 'action', 'resource_type'],
   'sessions': ['src_ip', 'dst_ip', 'application'],
+  'app-flows': ['application', 'hostname', 'client_ip'],
 };
 
 const FILTER_COLS = {
@@ -284,6 +287,7 @@ const FILTER_COLS = {
   'dns-entries': ['list_type'],
   'ids-alerts': ['severity', 'acknowledged'],
   'dns-logs': ['action'],
+  'app-flows': ['application', 'category', 'source'],
 };
 
 const BOOL_FIELDS = {
@@ -313,6 +317,7 @@ const INSERTABLE_COLS = {
   'backup-records': ['created_by', 'label', 'description', 'trigger_type', 'size_bytes', 'encrypted', 'payload', 'checksum'],
   'rule-apply-history': ['applied_by', 'mode', 'os_target', 'rules_count', 'status', 'rollback_timer_seconds', 'rules_snapshot', 'compiled_output'],
   'system-health': ['recorded_at', 'cpu_percent', 'ram_percent', 'ram_used_mb', 'ram_total_mb', 'disk_percent', 'disk_used_gb', 'disk_total_gb', 'load_avg_1m', 'load_avg_5m', 'load_avg_15m', 'services'],
+  'app-flows': ['timestamp', 'client_ip', 'dest_ip', 'application', 'category', 'hostname', 'protocol', 'app_proto', 'source', 'bytes'],
 };
 
 const UPDATABLE_COLS = {
@@ -460,6 +465,7 @@ const CRUD_RESOURCES = [
   'firewall-policies', 'firewall-logs', 'dns-entries', 'dns-logs', 'ids-alerts',
   'threat-feeds', 'threat-indicators', 'network-interfaces', 'nat-rules',
   'audit-log', 'sessions', 'backup-records', 'rule-apply-history', 'system-health',
+  'app-flows',
 ];
 
 // Special routes must be registered before the generic /:id routes.
@@ -631,6 +637,36 @@ api.get('/vpn-peers/:id/config', async (req, res) => {
   }
 });
 
+// Aggregated application stats over a recent time window (default 24h).
+api.get('/app-flows/stats', async (req, res) => {
+  try {
+    const hours = Math.min(Math.max(parseInt(req.query.hours, 10) || 24, 1), 720);
+    const byApp = await query(
+      `SELECT application, category,
+              COUNT(*) AS flows,
+              SUM(bytes) AS bytes,
+              COUNT(DISTINCT client_ip) AS clients,
+              MAX(timestamp) AS last_seen
+       FROM app_flows
+       WHERE timestamp >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+       GROUP BY application, category
+       ORDER BY flows DESC
+       LIMIT 100`,
+      [hours]
+    );
+    const byCategory = await query(
+      `SELECT category, COUNT(*) AS flows, SUM(bytes) AS bytes
+       FROM app_flows
+       WHERE timestamp >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+       GROUP BY category ORDER BY flows DESC`,
+      [hours]
+    );
+    res.json({ data: { apps: castRows(byApp), categories: castRows(byCategory), hours } });
+  } catch (e) {
+    serverError(res, 'app-flows stats', e);
+  }
+});
+
 for (const resource of CRUD_RESOURCES) {
   api.get(`/${resource}`, (req, res) => listRows(resource, req, res));
   api.get(`/${resource}/:id`, (req, res) => getRow(resource, req.params.id, res));
@@ -773,7 +809,7 @@ agent.post('/firewall-logs', async (req, res) => {
 agent.get('/dns-config', async (_req, res) => {
   try {
     const settings = await query(
-      "SELECT `key`, value FROM system_settings WHERE `key` IN ('dns_filtering_enabled', 'dns_upstream')"
+      "SELECT `key`, value FROM system_settings WHERE `key` IN ('dns_filtering_enabled', 'dns_upstream', 'appid_enabled')"
     );
     const map = Object.fromEntries(settings.map(r => [r.key, r.value]));
     const entries = await query(
@@ -795,6 +831,7 @@ agent.get('/dns-config', async (_req, res) => {
       data: {
         enabled: map.dns_filtering_enabled === 'true',
         upstream: map.dns_upstream || '1.1.1.1',
+        appid_enabled: map.appid_enabled !== 'false',
         entries: [...castRows(entries), ...castRows(threatDomains)],
       },
     });
@@ -903,6 +940,29 @@ agent.post('/vpn-telemetry', async (req, res) => {
     res.json({ updated: peers.length });
   } catch (e) {
     serverError(res, 'agent vpn-telemetry', e);
+  }
+});
+
+// Bulk application-flow ingestion (max 500 per request).
+agent.post('/app-flows', async (req, res) => {
+  try {
+    const flows = Array.isArray(req.body?.flows) ? req.body.flows.slice(0, 500) : [];
+    if (!flows.length) return res.json({ inserted: 0 });
+    const allowed = INSERTABLE_COLS['app-flows'];
+    let inserted = 0;
+    for (const flow of flows) {
+      const data = prepareFields(flow, [], allowed);
+      if (!data.application) continue;
+      data.id = randomUUID();
+      if (!data.timestamp) data.timestamp = now();
+      const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+      const placeholders = Object.keys(data).map(() => '?').join(', ');
+      await query(`INSERT INTO app_flows (${cols}) VALUES (${placeholders})`, Object.values(data));
+      inserted++;
+    }
+    res.json({ inserted });
+  } catch (e) {
+    serverError(res, 'agent app-flows', e);
   }
 });
 
@@ -1025,6 +1085,21 @@ async function ensureVpnTables() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_public_key (public_key)
     )`);
+    await getPool().query(`CREATE TABLE IF NOT EXISTS app_flows (
+      id VARCHAR(36) PRIMARY KEY,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+      client_ip VARCHAR(50),
+      dest_ip VARCHAR(50),
+      application VARCHAR(100),
+      category VARCHAR(50),
+      hostname VARCHAR(255),
+      protocol VARCHAR(20),
+      app_proto VARCHAR(30),
+      source VARCHAR(10),
+      bytes BIGINT DEFAULT 0,
+      INDEX idx_timestamp (timestamp),
+      INDEX idx_application (application)
+    )`);
   } catch (e) {
     console.error('ensureVpnTables failed:', e.message);
   }
@@ -1052,6 +1127,7 @@ async function ensureDefaultSettings() {
     ['dns_upstream', '1.1.1.1', 'Upstream DNS resolver for the filtering proxy'],
     ['suricata_queue_num', '0', 'NFQUEUE number Suricata reads in IPS mode'],
     ['suricata_eve_path', '/var/log/suricata/eve.json', 'Path to Suricata eve.json'],
+    ['appid_enabled', 'true', 'Enable application identification (app_flows)'],
   ];
   try {
     for (const [key, value, description] of defaults) {
@@ -1088,6 +1164,7 @@ async function pruneOldLogs() {
       ['firewall_logs', 'timestamp'],
       ['dns_logs', 'timestamp'],
       ['ids_alerts', 'timestamp'],
+      ['app_flows', 'timestamp'],
       ['system_health_snapshots', 'recorded_at'],
     ];
     for (const [table, col] of tables) {

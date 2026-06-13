@@ -175,6 +175,7 @@ INSERT IGNORE INTO system_settings (`key`, value, description) VALUES
   ('ips_mode', 'off', 'Suricata mode: off, ids (detect), or ips (inline block)'),
   ('suricata_queue_num', '0', 'NFQUEUE number Suricata reads in IPS mode'),
   ('suricata_eve_path', '/var/log/suricata/eve.json', 'Path to Suricata eve.json'),
+  ('appid_enabled', 'true', 'Enable application identification (app_flows)'),
   ('log_retention_days', '90', 'Log retention in days'),
   ('dashboard_refresh_seconds', '15', 'Dashboard auto-refresh interval');
 
@@ -269,6 +270,22 @@ CREATE TABLE IF NOT EXISTS vpn_peers (
   tx_bytes BIGINT DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_public_key (public_key)
+);
+
+CREATE TABLE IF NOT EXISTS app_flows (
+  id VARCHAR(36) PRIMARY KEY,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+  client_ip VARCHAR(50),
+  dest_ip VARCHAR(50),
+  application VARCHAR(100),
+  category VARCHAR(50),
+  hostname VARCHAR(255),
+  protocol VARCHAR(20),
+  app_proto VARCHAR(30),
+  source VARCHAR(10),
+  bytes BIGINT DEFAULT 0,
+  INDEX idx_timestamp (timestamp),
+  INDEX idx_application (application)
 );
 
 CREATE TABLE IF NOT EXISTS system_health_snapshots (

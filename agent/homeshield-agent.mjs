@@ -28,7 +28,8 @@ import os from 'node:os';
 import dgram from 'node:dgram';
 import { parseKernelLogLine, parseConntrack, splitJournalOutput } from './parsers.mjs';
 import { parseQuery, buildBlockResponse, createMatcher, sinkholeAddress } from './dns.mjs';
-import { parseEveAlert, buildIpsTable } from './ips.mjs';
+import { parseEveLine, mapAlertEvent, buildIpsTable } from './ips.mjs';
+import { classifyApp, isIdentified, appFlowFromEvent } from './appid.mjs';
 import { buildThreatTable, splitByFamily } from './threats.mjs';
 import { buildServerConfig, buildVpnNatTable, parseWgDump } from './wg.mjs';
 
@@ -352,6 +353,24 @@ function handleDnsQuery(msg, rinfo) {
     response_ip: verdict.action === 'blocked' ? sinkholeAddress(parsed.qtype) : '',
     query_type: parsed.qtypeName,
   });
+
+  // Application identification from the resolved domain (standalone signal,
+  // no Suricata required). Only record concrete apps to avoid log flooding.
+  if (appidEnabled && verdict.action !== 'blocked') {
+    const { application, category } = classifyApp(parsed.domain);
+    if (isIdentified(application)) {
+      pushAppFlow({
+        client_ip: rinfo.address,
+        application,
+        category,
+        hostname: parsed.domain,
+        protocol: 'udp',
+        app_proto: 'dns',
+        source: 'dns',
+        bytes: 0,
+      });
+    }
+  }
 }
 
 function startDnsProxy() {
@@ -378,6 +397,7 @@ async function refreshDnsConfig() {
   const config = await api('/dns-config');
   dnsUpstream = config.upstream || '1.1.1.1';
   dnsMatcher = createMatcher(config.entries || []);
+  appidEnabled = config.appid_enabled !== false;
   if (config.enabled && !dnsSocket) startDnsProxy();
   if (!config.enabled && dnsSocket) stopDnsProxy();
 }
@@ -387,6 +407,27 @@ async function flushDnsLogs() {
     const batch = dnsLogBuffer.slice(0, 500);
     await api('/dns-logs', { method: 'POST', body: JSON.stringify({ logs: batch }) });
     dnsLogBuffer = dnsLogBuffer.slice(batch.length);
+  }
+}
+
+// ─── Application identification ────────────────────────────────────────────
+// app_flows are produced from two sources: the DNS proxy above (domain-based)
+// and Suricata eve.json tls/quic/http/flow events (SNI/host + protocol). Both
+// feed one buffer, flushed in batches.
+
+let appidEnabled = true;
+let appFlowBuffer = [];
+
+function pushAppFlow(flow) {
+  appFlowBuffer.push(flow);
+  if (appFlowBuffer.length > 5000) appFlowBuffer = appFlowBuffer.slice(-5000);
+}
+
+async function flushAppFlows() {
+  while (appFlowBuffer.length) {
+    const batch = appFlowBuffer.slice(0, 500);
+    await api('/app-flows', { method: 'POST', body: JSON.stringify({ flows: batch }) });
+    appFlowBuffer = appFlowBuffer.slice(batch.length);
   }
 }
 
@@ -468,8 +509,10 @@ async function readNewLines(path, fromOffset) {
   }
 }
 
-async function collectIdsAlerts() {
-  if (ipsMode === 'off') return;
+// Tails eve.json once and dispatches each event to alerts (ids_alerts) and/or
+// application flows (app_flows), depending on event type and enabled features.
+async function collectEveEvents() {
+  if (ipsMode === 'off' && !appidEnabled) return;
   try {
     await statFile(evePath);
   } catch {
@@ -477,7 +520,20 @@ async function collectIdsAlerts() {
   }
 
   const { lines, newOffset } = await readNewLines(evePath, eveOffset);
-  const alerts = lines.map(parseEveAlert).filter(Boolean);
+
+  const alerts = [];
+  for (const line of lines) {
+    const event = parseEveLine(line);
+    if (!event) continue;
+
+    if (ipsMode !== 'off' && event.event_type === 'alert') {
+      const row = mapAlertEvent(event);
+      if (row) alerts.push(row);
+    } else if (appidEnabled) {
+      const flow = appFlowFromEvent(event);
+      if (flow) pushAppFlow(flow);
+    }
+  }
 
   for (let i = 0; i < alerts.length; i += 500) {
     await api('/ids-alerts', {
@@ -630,9 +686,9 @@ async function main() {
     }
 
     try {
-      await collectIdsAlerts();
+      await collectEveEvents();
     } catch (e) {
-      log('IDS/IPS alert ingestion error:', e.message);
+      log('eve.json ingestion error:', e.message);
     }
 
     if (Date.now() - lastConfigRefresh > DNS_REFRESH_SECONDS * 1000) {
@@ -663,6 +719,12 @@ async function main() {
       await flushDnsLogs();
     } catch (e) {
       log('DNS log flush error:', e.message);
+    }
+
+    try {
+      await flushAppFlows();
+    } catch (e) {
+      log('App flow flush error:', e.message);
     }
 
     if (Date.now() - lastTelemetry > TELEMETRY_SECONDS * 1000) {

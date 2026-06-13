@@ -138,6 +138,35 @@ indicators are stored and counted but not yet enforced. Good starter feeds:
 abuse.ch Feodo Tracker / URLhaus, Emerging Threats compromised IPs,
 Spamhaus DROP.
 
+## Application identification & TLS/SNI inspection
+
+The **Applications** page shows which apps your network is using (YouTube,
+Netflix, BitTorrent, Zoom, Discord, etc.), broken down by category, with a
+recent-flows table showing the TLS SNI / hostname behind each flow. Controlled
+by the **Application Identification** toggle in Settings.
+
+The agent classifies traffic from two signals (`appid.mjs` signature table):
+
+1. **DNS-based (always on with the DNS proxy)** — every resolved domain is
+   matched against the app signatures. Works with no extra software, but only
+   sees domains, not bytes.
+2. **Suricata app-layer (when Suricata is enabled)** — the agent also reads
+   `tls`, `quic`, `http` and `flow` events from `eve.json`. This is the
+   **TLS/SNI inspection**: the SNI in the (cleartext) TLS ClientHello is read
+   passively to identify the app and show the destination hostname, and `flow`
+   events provide byte counts for non-web protocols like BitTorrent.
+
+To get the Suricata signals, ensure eve.json logging includes these event
+types (the default `eve-log` config does). No change beyond enabling Suricata
+(IDS or IPS mode) is needed.
+
+**On MITM decryption:** HomeShield does passive SNI inspection only — it never
+decrypts TLS. Full man-in-the-middle decryption (internal CA, certificate
+injection, per-connection TLS termination) is intentionally **not** implemented:
+it is a large subsystem with significant privacy and trust implications, and
+SNI inspection covers app identification for the vast majority of traffic
+without breaking end-to-end encryption.
+
 ## WireGuard VPN
 
 Configure the server and peers on the VPN page. The **server** generates all

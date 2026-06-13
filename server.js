@@ -1,7 +1,7 @@
 import express from 'express';
 import mysql from 'mysql2/promise';
 import { createHmac, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
@@ -12,6 +12,7 @@ import { buildEnvelope, readEnvelope, sha256 } from './backup.mjs';
 import { generateSecret, verifyTOTP, otpauthURL } from './totp.mjs';
 import { renderPrometheus, groupSamples } from './metrics.mjs';
 import { buildWindowsInstaller } from './ipsec.mjs';
+import { buildWindowsBootstrap } from './bootstrap.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -852,6 +853,31 @@ api.get('/ipsec-client-script', async (_req, res) => {
   } catch (e) {
     serverError(res, 'ipsec client script', e);
   }
+});
+
+// ─── Agent downloads ───────────────────────────────────────────────────────
+
+// Self-contained Windows agent installer (embeds the agent script), with the
+// API URL pre-filled from the request.
+api.get('/agent-download/windows', (req, res) => {
+  try {
+    const scriptPath = join(__dirname, 'agent-windows', 'homeshield-agent.ps1');
+    if (!existsSync(scriptPath)) return res.status(404).json({ error: 'Windows agent not bundled with this build' });
+    const agentScript = readFileSync(scriptPath, 'utf8');
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+    const host = req.get('host') || '';
+    const bootstrap = buildWindowsBootstrap(agentScript, host ? `${proto}://${host}` : '');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="homeshield-install.ps1"');
+    res.send(bootstrap);
+  } catch (e) {
+    serverError(res, 'agent-download windows', e);
+  }
+});
+
+// Whether the agent API is enabled (so the UI can warn if AGENT_TOKEN is unset).
+api.get('/agent-status', (_req, res) => {
+  res.json({ data: { agent_api_enabled: !!AGENT_TOKEN } });
 });
 
 // ─── Devices (inventory) ───────────────────────────────────────────────────

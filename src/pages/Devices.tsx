@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, Trash2, Monitor, Server, Smartphone, HelpCircle } from 'lucide-react';
+import { RefreshCw, Trash2, Monitor, Server, Smartphone, HelpCircle, Download, Plus, AlertTriangle } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card, CardHeader } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
@@ -34,6 +34,8 @@ export function Devices() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [installOpen, setInstallOpen] = useState(false);
+  const [agentEnabled, setAgentEnabled] = useState(true);
 
   async function fetchDevices() {
     const { data } = await api.get<Device[]>('devices');
@@ -43,9 +45,12 @@ export function Devices() {
 
   useEffect(() => {
     fetchDevices();
+    api.get<{ agent_api_enabled: boolean }>('agent-status').then(r => setAgentEnabled(r.data?.agent_api_enabled ?? true));
     const t = setInterval(fetchDevices, 15000);
     return () => clearInterval(t);
   }, []);
+
+  const installCmd = `.\\homeshield-install.ps1 -Token "<AGENT_TOKEN>"`;
 
   async function removeDevice(id: string) {
     await api.del(`devices/${id}`);
@@ -62,8 +67,18 @@ export function Devices() {
           <h1 className="text-xl font-bold text-text-primary">Devices</h1>
           <p className="text-sm text-text-muted mt-0.5">{devices.length} enrolled · {online} online</p>
         </div>
-        <Button variant="ghost" size="sm" onClick={fetchDevices}><RefreshCw className="w-3.5 h-3.5" /></Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={fetchDevices}><RefreshCw className="w-3.5 h-3.5" /></Button>
+          <Button variant="primary" onClick={() => setInstallOpen(true)}><Plus className="w-4 h-4" /> Install Agent</Button>
+        </div>
       </div>
+
+      {!agentEnabled && (
+        <div className="flex items-start gap-2 px-4 py-3 bg-warning/10 border border-warning/20 rounded-xl text-sm text-warning">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>The agent API is disabled — set <code className="font-mono">AGENT_TOKEN</code> in the server environment and restart, or agents can't enroll.</span>
+        </div>
+      )}
 
       <Card>
         <CardHeader><span className="font-semibold text-text-primary">Enrolled Agents</span></CardHeader>
@@ -120,6 +135,44 @@ export function Devices() {
           </table>
         </div>
       </Card>
+
+      <Modal open={installOpen} onClose={() => setInstallOpen(false)} title="Install an Agent" size="md">
+        <div className="space-y-5">
+          {/* Windows */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+              <Monitor className="w-4 h-4 text-info" /> Windows
+            </div>
+            <p className="text-xs text-text-muted">
+              Download the installer, then run it from an <strong>elevated</strong> PowerShell. It enrolls the
+              device, enforces firewall policy, and sets up the IPSec VPN client.
+            </p>
+            <Button variant="primary" onClick={() => api.download('agent-download/windows', 'homeshield-install.ps1')}>
+              <Download className="w-4 h-4" /> Download Windows Installer (.ps1)
+            </Button>
+            <div className="text-xs text-text-muted mt-1">Then run (the server URL is pre-filled):</div>
+            <code className="block px-3 py-2 bg-brand-main rounded-lg text-xs font-mono text-success break-all">{installCmd}</code>
+            <p className="text-xs text-text-muted/70">
+              <code className="font-mono">AGENT_TOKEN</code> is the shared secret set in the server's environment
+              (the same value enables the agent API).
+            </p>
+          </div>
+
+          {/* Linux */}
+          <div className="space-y-2 pt-3 border-t border-border-muted">
+            <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+              <Server className="w-4 h-4 text-warning" /> Linux (gateway / host)
+            </div>
+            <p className="text-xs text-text-muted">
+              Build and install the <code className="font-mono">.deb</code> on the Linux machine
+              (<code className="font-mono">packaging/agent/build-deb.sh</code>), set
+              <code className="font-mono"> /etc/homeshield/agent.env</code>, then
+              <code className="font-mono"> systemctl enable --now homeshield-agent</code>. This host runs nftables
+              enforcement and the IPSec/WireGuard VPN <em>server</em>. See <code className="font-mono">agent/README.md</code>.
+            </p>
+          </div>
+        </div>
+      </Modal>
 
       <Modal open={!!deleteId} onClose={() => setDeleteId(null)} title="Remove Device" size="sm">
         <p className="text-sm text-text-secondary">Remove this device from the inventory? If its agent is still running it will re-enroll on the next heartbeat.</p>

@@ -1053,6 +1053,29 @@ agent.get('/threat-set', async (_req, res) => {
   }
 });
 
+// GeoIP filtering config for the agent: mode, country list and zone sources.
+agent.get('/geoip-config', async (_req, res) => {
+  try {
+    const rows = await query(
+      "SELECT `key`, value FROM system_settings WHERE `key` IN ('geoip_enabled', 'geoip_mode', 'geoip_countries', 'geoip_source_v4', 'geoip_source_v6')"
+    );
+    const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
+    const countries = (map.geoip_countries || '')
+      .split(',').map(c => c.trim().toLowerCase()).filter(c => /^[a-z]{2}$/.test(c));
+    res.json({
+      data: {
+        enabled: map.geoip_enabled === 'true',
+        mode: map.geoip_mode === 'allow' ? 'allow' : 'block',
+        countries,
+        source_v4: map.geoip_source_v4 || 'https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone',
+        source_v6: map.geoip_source_v6 || 'https://www.ipdeny.com/ipv6/ipaddresses/aggregated/{cc}-aggregated.zone',
+      },
+    });
+  } catch (e) {
+    serverError(res, 'agent geoip-config', e);
+  }
+});
+
 // WireGuard config for the agent: server settings + enabled peers.
 agent.get('/vpn-config', async (_req, res) => {
   try {
@@ -1277,6 +1300,11 @@ async function ensureDefaultSettings() {
     ['suricata_queue_num', '0', 'NFQUEUE number Suricata reads in IPS mode'],
     ['suricata_eve_path', '/var/log/suricata/eve.json', 'Path to Suricata eve.json'],
     ['appid_enabled', 'true', 'Enable application identification (app_flows)'],
+    ['geoip_enabled', 'false', 'Enable GeoIP country filtering'],
+    ['geoip_mode', 'block', 'GeoIP mode: block (drop listed) or allow (only listed inbound)'],
+    ['geoip_countries', '', 'Comma-separated ISO country codes for GeoIP filtering'],
+    ['geoip_source_v4', 'https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone', 'IPv4 country zone URL template ({cc} = country code)'],
+    ['geoip_source_v6', 'https://www.ipdeny.com/ipv6/ipaddresses/aggregated/{cc}-aggregated.zone', 'IPv6 country zone URL template'],
   ];
   try {
     for (const [key, value, description] of defaults) {

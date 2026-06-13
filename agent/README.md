@@ -167,6 +167,28 @@ it is a large subsystem with significant privacy and trust implications, and
 SNI inspection covers app identification for the vast majority of traffic
 without breaking end-to-end encryption.
 
+## GeoIP filtering
+
+Select countries on the GeoIP page in **block** mode (drop traffic to/from
+those countries) or **allow** mode (permit inbound only from those countries).
+The agent downloads per-country aggregated CIDR zone files from a configurable
+source (default ipdeny.com) and compiles them into an nftables set
+(`table inet homeshield_geo`, priority −5, before policy).
+
+- Zones are cached and re-downloaded only when the country selection changes
+  or the cache goes stale (`GEO_REFRESH_HOURS`, default 12). The table is
+  re-applied only when the data/mode changes or it's missing (self-heals after
+  a rollback).
+- **Allow mode** always permits loopback, established connections and private
+  ranges (10/8, 172.16/12, 192.168/16, link-local, multicast) so it can't cut
+  off LAN/management access — but double-check your own country is selected.
+- GeoIP is approximate: VPNs, CDNs and cloud IPs may not map to the expected
+  country.
+
+The agent machine needs outbound HTTPS to the zone source. Configure the
+source URL templates via the `geoip_source_v4` / `geoip_source_v6` settings
+(`{cc}` is replaced with the lowercase country code).
+
 ## WireGuard VPN
 
 Configure the server and peers on the VPN page. The **server** generates all

@@ -32,6 +32,7 @@ import { parseEveLine, mapAlertEvent, buildIpsTable } from './ips.mjs';
 import { classifyApp, isIdentified, appFlowFromEvent } from './appid.mjs';
 import { buildThreatTable, splitByFamily } from './threats.mjs';
 import { buildServerConfig, buildVpnNatTable, parseWgDump } from './wg.mjs';
+import { parseZoneFile, buildGeoTable } from './geoip.mjs';
 
 const exec = promisify(execFile);
 
@@ -585,6 +586,89 @@ async function refreshThreatSet() {
   threatTableActive = true;
 }
 
+// ─── GeoIP filtering ───────────────────────────────────────────────────────
+// Downloads per-country CIDR zone files and compiles them into an nftables set
+// (homeshield_geo). Zones are cached and only re-downloaded when the country
+// selection changes or the cache goes stale; the table is re-applied only when
+// the data or mode changes, or when it's missing (self-heal after a rollback).
+
+const GEO_REFRESH_MS = (parseInt(process.env.GEO_REFRESH_HOURS || '12', 10)) * 3600 * 1000;
+let geoCidrs = { v4: [], v6: [] };
+let geoFetchKey = '';
+let geoFetchedAt = 0;
+let geoAppliedSig = '';
+let geoTableActive = false;
+
+async function fetchZone(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': 'HomeShield-NGFW/1.0' } });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return parseZoneFile(await resp.text());
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchGeoCidrs(config) {
+  const v4 = [];
+  const v6 = [];
+  for (const cc of config.countries) {
+    const code = cc.toLowerCase();
+    if (config.source_v4) {
+      try { v4.push(...await fetchZone(config.source_v4.replace('{cc}', code))); }
+      catch (e) { log(`GeoIP: ${cc} v4 fetch failed: ${e.message}`); }
+    }
+    if (config.source_v6) {
+      try { v6.push(...await fetchZone(config.source_v6.replace('{cc}', code))); }
+      catch { /* many countries have no v6 zone — ignore */ }
+    }
+  }
+  return { v4, v6 };
+}
+
+async function geoTableExists() {
+  try { await exec('nft', ['list', 'table', 'inet', 'homeshield_geo']); return true; }
+  catch { return false; }
+}
+
+async function removeGeoTable() {
+  try { await exec('nft', ['delete', 'table', 'inet', 'homeshield_geo']); } catch {}
+  geoTableActive = false;
+}
+
+async function refreshGeoConfig() {
+  const config = await api('/geoip-config');
+
+  if (!config.enabled || !config.countries?.length) {
+    if (geoTableActive) { await removeGeoTable(); log('GeoIP filtering disabled'); }
+    geoAppliedSig = '';
+    return;
+  }
+
+  const key = config.countries.map(c => c.toLowerCase()).sort().join(',');
+  if (key !== geoFetchKey || Date.now() - geoFetchedAt > GEO_REFRESH_MS) {
+    geoCidrs = await fetchGeoCidrs(config);
+    geoFetchKey = key;
+    geoFetchedAt = Date.now();
+  }
+
+  const sig = `${config.mode}|${key}|${geoFetchedAt}`;
+  const tableMissing = !(await geoTableExists());
+  if (sig === geoAppliedSig && !tableMissing) return; // unchanged and present
+
+  const script = buildGeoTable(config.mode, geoCidrs.v4, geoCidrs.v6);
+  if (!script) { await removeGeoTable(); geoAppliedSig = ''; return; }
+
+  const file = join(STATE_DIR, 'geoip.nft');
+  await writeFile(file, script, 'utf8');
+  await exec('nft', ['-f', file]);
+  geoAppliedSig = sig;
+  geoTableActive = true;
+  log(`GeoIP ${config.mode}list applied: ${config.countries.length} countries, ${geoCidrs.v4.length} v4 / ${geoCidrs.v6.length} v6 nets`);
+}
+
 // ─── WireGuard VPN ─────────────────────────────────────────────────────────
 // Applies the WireGuard server config and a masquerade table so clients reach
 // the internet. Uses `wg syncconf` for live peer updates when the interface is
@@ -711,6 +795,11 @@ async function main() {
         await refreshVpn();
       } catch (e) {
         log('VPN refresh error:', e.message);
+      }
+      try {
+        await refreshGeoConfig();
+      } catch (e) {
+        log('GeoIP refresh error:', e.message);
       }
       lastConfigRefresh = Date.now();
     }

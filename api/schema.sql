@@ -176,6 +176,11 @@ INSERT IGNORE INTO system_settings (`key`, value, description) VALUES
   ('suricata_queue_num', '0', 'NFQUEUE number Suricata reads in IPS mode'),
   ('suricata_eve_path', '/var/log/suricata/eve.json', 'Path to Suricata eve.json'),
   ('appid_enabled', 'true', 'Enable application identification (app_flows)'),
+  ('geoip_enabled', 'false', 'Enable GeoIP country filtering'),
+  ('geoip_mode', 'block', 'GeoIP mode: block (drop listed) or allow (only listed inbound)'),
+  ('geoip_countries', '', 'Comma-separated ISO country codes for GeoIP filtering'),
+  ('geoip_source_v4', 'https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone', 'IPv4 country zone URL template'),
+  ('geoip_source_v6', 'https://www.ipdeny.com/ipv6/ipaddresses/aggregated/{cc}-aggregated.zone', 'IPv6 country zone URL template'),
   ('log_retention_days', '90', 'Log retention in days'),
   ('dashboard_refresh_seconds', '15', 'Dashboard auto-refresh interval');
 

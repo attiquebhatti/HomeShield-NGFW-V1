@@ -10,6 +10,7 @@ import { parseFeed } from './feeds.mjs';
 import { generateKeyPair, derivePublicKey, generatePresharedKey, nextPeerAddress, buildClientConfig } from './wireguard.mjs';
 import { buildEnvelope, readEnvelope, sha256 } from './backup.mjs';
 import { generateSecret, verifyTOTP, otpauthURL } from './totp.mjs';
+import { renderPrometheus, groupSamples } from './metrics.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -185,6 +186,83 @@ async function autoMigrate() {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
+});
+
+// ─── Prometheus metrics ──────────────────────────────────────────────────────
+// Scrape endpoint at /metrics. If METRICS_TOKEN is set it must be supplied via
+// ?token= or an Authorization: Bearer header; otherwise the endpoint is open
+// (intended for a trusted LAN / localhost Prometheus).
+
+const METRICS_TOKEN = process.env.METRICS_TOKEN || '';
+
+async function collectMetricFamilies() {
+  const one = async (sql, params = []) => Number((await query(sql, params))[0]?.c || 0);
+
+  const [
+    policies, dnsEntries, fwEvents, dnsQueries, idsAlerts, idsUnack,
+    indicators, feeds, appFlows, vpnPeers, sessions, users, health, interfaces,
+  ] = await Promise.all([
+    query("SELECT IF(enabled=1,'enabled','disabled') AS k, COUNT(*) AS count FROM firewall_policies GROUP BY k"),
+    query('SELECT list_type AS k, COUNT(*) AS count FROM dns_entries GROUP BY list_type'),
+    query("SELECT action AS k, COUNT(*) AS count FROM firewall_logs WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR) GROUP BY action"),
+    query("SELECT action AS k, COUNT(*) AS count FROM dns_logs WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR) GROUP BY action"),
+    query("SELECT severity AS k, COUNT(*) AS count FROM ids_alerts WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR) GROUP BY severity"),
+    one('SELECT COUNT(*) AS c FROM ids_alerts WHERE acknowledged = 0'),
+    query('SELECT indicator_type AS k, COUNT(*) AS count FROM threat_indicators GROUP BY indicator_type'),
+    query("SELECT IF(enabled=1,'enabled','disabled') AS k, COUNT(*) AS count FROM threat_feeds GROUP BY k"),
+    query("SELECT category AS k, COUNT(*) AS count FROM app_flows WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR) GROUP BY category"),
+    query("SELECT IF(enabled=1,'enabled','disabled') AS k, COUNT(*) AS count FROM vpn_peers GROUP BY k"),
+    one('SELECT COUNT(*) AS c FROM sessions'),
+    query('SELECT role AS k, COUNT(*) AS count FROM admin_users GROUP BY role'),
+    query('SELECT cpu_percent, ram_percent, disk_percent FROM system_health_snapshots ORDER BY recorded_at DESC LIMIT 1'),
+    query('SELECT name, rx_bytes, tx_bytes FROM network_interfaces'),
+  ]);
+
+  const families = [
+    { name: 'homeshield_up', help: 'Management server is up', type: 'gauge', samples: [{ value: 1 }] },
+    { name: 'homeshield_firewall_policies', help: 'Firewall policies by status', type: 'gauge', samples: groupSamples(policies, 'status') },
+    { name: 'homeshield_dns_list_entries', help: 'DNS list entries by type', type: 'gauge', samples: groupSamples(dnsEntries, 'list_type') },
+    { name: 'homeshield_firewall_events_24h', help: 'Firewall log events in the last 24h by action', type: 'gauge', samples: groupSamples(fwEvents, 'action') },
+    { name: 'homeshield_dns_queries_24h', help: 'DNS queries in the last 24h by action', type: 'gauge', samples: groupSamples(dnsQueries, 'action') },
+    { name: 'homeshield_ids_alerts_24h', help: 'IDS/IPS alerts in the last 24h by severity', type: 'gauge', samples: groupSamples(idsAlerts, 'severity') },
+    { name: 'homeshield_ids_alerts_unacknowledged', help: 'Unacknowledged IDS/IPS alerts', type: 'gauge', samples: [{ value: idsUnack }] },
+    { name: 'homeshield_threat_indicators', help: 'Threat indicators by type', type: 'gauge', samples: groupSamples(indicators, 'indicator_type') },
+    { name: 'homeshield_threat_feeds', help: 'Threat feeds by status', type: 'gauge', samples: groupSamples(feeds, 'status') },
+    { name: 'homeshield_app_flows_24h', help: 'Identified application flows in the last 24h by category', type: 'gauge', samples: groupSamples(appFlows, 'category') },
+    { name: 'homeshield_vpn_peers', help: 'WireGuard peers by status', type: 'gauge', samples: groupSamples(vpnPeers, 'status') },
+    { name: 'homeshield_sessions', help: 'Tracked connection sessions', type: 'gauge', samples: [{ value: sessions }] },
+    { name: 'homeshield_users', help: 'Admin users by role', type: 'gauge', samples: groupSamples(users, 'role') },
+  ];
+
+  if (health.length) {
+    families.push(
+      { name: 'homeshield_cpu_percent', help: 'Latest CPU usage percent', type: 'gauge', samples: [{ value: health[0].cpu_percent }] },
+      { name: 'homeshield_ram_percent', help: 'Latest RAM usage percent', type: 'gauge', samples: [{ value: health[0].ram_percent }] },
+      { name: 'homeshield_disk_percent', help: 'Latest disk usage percent', type: 'gauge', samples: [{ value: health[0].disk_percent }] },
+    );
+  }
+  if (interfaces.length) {
+    families.push(
+      { name: 'homeshield_interface_rx_bytes', help: 'Interface received bytes', type: 'counter', samples: interfaces.map(i => ({ value: i.rx_bytes, labels: { interface: i.name } })) },
+      { name: 'homeshield_interface_tx_bytes', help: 'Interface transmitted bytes', type: 'counter', samples: interfaces.map(i => ({ value: i.tx_bytes, labels: { interface: i.name } })) },
+    );
+  }
+  return families;
+}
+
+app.get('/metrics', async (req, res) => {
+  if (METRICS_TOKEN) {
+    const provided = req.query.token || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (provided !== METRICS_TOKEN) return res.status(401).send('Unauthorized');
+  }
+  try {
+    const text = renderPrometheus(await collectMetricFamilies());
+    res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(text);
+  } catch (e) {
+    console.error('metrics error:', e.message);
+    res.status(500).send('# metrics collection failed\n');
+  }
 });
 
 // Signup is only open while no admin account exists (first-run setup).

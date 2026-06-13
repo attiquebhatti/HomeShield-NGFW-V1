@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Download, Upload, Trash2, Shield, CheckCircle2, AlertTriangle,
-  Database, Lock, RefreshCw, FileJson
+  Database, Lock, RefreshCw, FileJson, RotateCcw, Plus
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card, CardHeader, CardBody } from '../components/ui/Card';
@@ -27,179 +27,121 @@ function formatSize(bytes: number) {
 }
 
 const triggerVariant: Record<string, 'info' | 'neutral' | 'warning'> = {
-  manual: 'info',
-  auto: 'neutral',
-  'pre-apply': 'warning',
+  manual: 'info', auto: 'neutral', 'pre-apply': 'warning',
 };
+
+const cls = 'w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-brand-gold/50 focus:ring-1 focus:ring-brand-gold/20 transition-all';
+const lbl = 'block text-xs font-medium text-text-muted mb-1';
 
 export function Backup() {
   const [records, setRecords] = useState<BackupRecord[]>([]);
   const [loading, setLoading] = useState(true);
-  const [exporting, setExporting] = useState(false);
-  const [importing, setImporting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [banner, setBanner] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  // Create modal
+  const [createOpen, setCreateOpen] = useState(false);
+  const [label, setLabel] = useState('');
+  const [description, setDescription] = useState('');
+  const [createPass, setCreatePass] = useState('');
+
+  // Restore modal (stored backup or uploaded file)
+  const [restore, setRestore] = useState<{ id?: string; payload?: string; encrypted: boolean; name: string } | null>(null);
+  const [restorePass, setRestorePass] = useState('');
+
   const [deleteId, setDeleteId] = useState<string | null>(null);
-  const [importModalOpen, setImportModalOpen] = useState(false);
-  const [importText, setImportText] = useState('');
-  const [importError, setImportError] = useState('');
-  const [importSuccess, setImportSuccess] = useState(false);
-  const [labelModalOpen, setLabelModalOpen] = useState(false);
-  const [exportLabel, setExportLabel] = useState('');
 
   async function fetchRecords() {
-    const { data } = await api
-      .from<BackupRecord>('backup_records')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const { data } = await api.get<BackupRecord[]>('backups');
     setRecords(data ?? []);
     setLoading(false);
   }
 
   useEffect(() => { fetchRecords(); }, []);
 
-  async function exportBackup(label: string) {
-    setExporting(true);
+  function flash(kind: 'success' | 'error', text: string) {
+    setBanner({ kind, text });
+    setTimeout(() => setBanner(null), 6000);
+  }
 
-    const [policies, dnsEntries, natRules, settings] = await Promise.all([
-      api.from('firewall_policies').select('*'),
-      api.from('dns_entries').select('*'),
-      api.from('nat_rules').select('*'),
-      api.from('system_settings').select('*'),
-    ]);
-
-    const payload = {
-      version: '1.0',
-      exported_at: new Date().toISOString(),
-      firewall_policies: policies.data ?? [],
-      dns_entries: dnsEntries.data ?? [],
-      nat_rules: natRules.data ?? [],
-      system_settings: settings.data ?? [],
-    };
-
-    const json = JSON.stringify(payload, null, 2);
-    const sizeBytes = new TextEncoder().encode(json).length;
-    const checksum = `sha256:${sizeBytes.toString(16)}`;
-
-    await api.from('backup_records').insert({
-      created_by: 'admin',
-      label: label || `Manual backup ${new Date().toLocaleDateString()}`,
-      description: 'User-initiated configuration export',
-      trigger_type: 'manual',
-      size_bytes: sizeBytes,
-      encrypted: false,
-      payload,
-      checksum,
+  async function createBackup() {
+    setBusy(true);
+    const { data, error } = await api.post<BackupRecord>('backups', {
+      label, description, passphrase: createPass || undefined,
     });
+    setBusy(false);
+    if (error) { flash('error', error); return; }
+    setCreateOpen(false);
+    setLabel(''); setDescription(''); setCreatePass('');
+    flash('success', 'Backup created.');
+    fetchRecords();
+    if (data?.id) api.download(`backups/${data.id}/download`);
+  }
 
-    await api.from('audit_log').insert({
-      actor: 'admin',
-      action: 'export',
-      resource_type: 'backup',
-      details: { size_bytes: sizeBytes, label },
-      ip_address: '127.0.0.1',
+  async function runRestore() {
+    if (!restore) return;
+    setBusy(true);
+    const { data, error } = await api.post<{ restored: Record<string, number> }>('backups/restore', {
+      id: restore.id, payload: restore.payload, passphrase: restorePass || undefined,
     });
-
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `homeshield-backup-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    setExporting(false);
-    setLabelModalOpen(false);
-    setExportLabel('');
+    setBusy(false);
+    if (error) { flash('error', error); return; }
+    const total = Object.values(data?.restored ?? {}).reduce((a, b) => a + b, 0);
+    setRestore(null); setRestorePass('');
+    flash('success', `Configuration restored (${total} records). The agent will re-apply within a cycle.`);
     fetchRecords();
   }
 
-  async function importBackup() {
-    setImportError('');
-    if (!importText.trim()) {
-      setImportError('Paste the backup JSON content first.');
-      return;
-    }
-
-    let parsed: any;
-    try {
-      parsed = JSON.parse(importText);
-    } catch {
-      setImportError('Invalid JSON. Please paste a valid HomeShield backup file.');
-      return;
-    }
-
-    if (!parsed.version || !parsed.firewall_policies) {
-      setImportError('This does not appear to be a valid HomeShield backup file.');
-      return;
-    }
-
-    setImporting(true);
-
-    if (parsed.firewall_policies?.length) {
-      await api.from('firewall_policies').upsert(parsed.firewall_policies, { onConflict: 'id' });
-    }
-    if (parsed.dns_entries?.length) {
-      await api.from('dns_entries').upsert(parsed.dns_entries, { onConflict: 'id' });
-    }
-    if (parsed.nat_rules?.length) {
-      await api.from('nat_rules').upsert(parsed.nat_rules, { onConflict: 'id' });
-    }
-    if (parsed.system_settings?.length) {
-      await api.from('system_settings').upsert(parsed.system_settings, { onConflict: 'key' });
-    }
-
-    await api.from('audit_log').insert({
-      actor: 'admin',
-      action: 'restore',
-      resource_type: 'backup',
-      details: {
-        policies_count: parsed.firewall_policies?.length ?? 0,
-        exported_at: parsed.exported_at,
-      },
-      ip_address: '127.0.0.1',
-    });
-
-    setImporting(false);
-    setImportModalOpen(false);
-    setImportText('');
-    setImportSuccess(true);
-    setTimeout(() => setImportSuccess(false), 5000);
+  async function onFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    e.target.value = '';
+    let encrypted = false;
+    try { encrypted = JSON.parse(text)?.encrypted === true; } catch { /* validated server-side */ }
+    setRestore({ payload: text, encrypted, name: file.name });
   }
 
   async function deleteRecord(id: string) {
-    await api.from('backup_records').delete().eq('id', id);
+    await api.del(`backups/${id}`);
     setDeleteId(null);
     fetchRecords();
   }
 
   return (
     <div className="p-4 lg:p-6 space-y-6">
+      <input ref={fileInput} type="file" accept=".json,application/json" className="hidden" onChange={onFilePicked} />
+
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-text-primary">Backup &amp; Restore</h1>
-          <p className="text-sm text-text-muted mt-0.5">Export and restore configuration snapshots</p>
+          <p className="text-sm text-text-muted mt-0.5">Capture and restore the full firewall configuration</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={fetchRecords}><RefreshCw className="w-3.5 h-3.5" /></Button>
-          <Button variant="secondary" onClick={() => setImportModalOpen(true)}>
-            <Upload className="w-4 h-4" /> Import
+          <Button variant="secondary" onClick={() => fileInput.current?.click()}>
+            <Upload className="w-4 h-4" /> Import File
           </Button>
-          <Button variant="primary" onClick={() => setLabelModalOpen(true)} loading={exporting}>
-            <Download className="w-4 h-4" /> Export Backup
+          <Button variant="primary" onClick={() => setCreateOpen(true)}>
+            <Plus className="w-4 h-4" /> Create Backup
           </Button>
         </div>
       </div>
 
-      {importSuccess && (
-        <div className="flex items-center gap-2 px-4 py-3 bg-success/10 border border-success/20 rounded-xl text-sm text-success">
-          <CheckCircle2 className="w-4 h-4" /> Configuration restored successfully.
+      {banner && (
+        <div className={`flex items-center gap-2 px-4 py-3 rounded-xl text-sm border ${
+          banner.kind === 'success' ? 'bg-success/10 border-success/20 text-success' : 'bg-danger/10 border-danger/20 text-danger'}`}>
+          {banner.kind === 'success' ? <CheckCircle2 className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
+          {banner.text}
         </div>
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
-          { label: 'Firewall Policies', icon: Shield, color: 'text-info bg-info/15' },
-          { label: 'DNS Entries', icon: Database, color: 'text-success bg-success/15' },
-          { label: 'NAT Rules', icon: Database, color: 'text-warning bg-warning/15' },
+          { label: 'Policies & NAT', icon: Shield, color: 'text-info bg-info/15' },
+          { label: 'DNS & Threat Feeds', icon: Database, color: 'text-success bg-success/15' },
+          { label: 'VPN (keys included)', icon: Lock, color: 'text-warning bg-warning/15' },
           { label: 'System Settings', icon: Lock, color: 'text-text-muted bg-brand-slate/50' },
         ].map(({ label, icon: Icon, color }) => (
           <div key={label} className="flex items-center gap-3 bg-brand-panel border border-border-muted rounded-xl p-4">
@@ -210,38 +152,6 @@ export function Backup() {
           </div>
         ))}
       </div>
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-warning" />
-            <span className="text-sm font-semibold text-text-primary">Recovery Guide</span>
-          </div>
-        </CardHeader>
-        <CardBody className="space-y-3">
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <div className="p-4 bg-brand-panel-soft border border-border-muted rounded-xl">
-              <div className="text-xs font-semibold text-text-primary mb-1">If locked out of UI</div>
-              <p className="text-xs text-text-muted">SSH into the host and run:</p>
-              <code className="block mt-2 px-3 py-2 bg-brand-main rounded-lg text-xs font-mono text-success">
-                sudo homeshield-recover
-              </code>
-            </div>
-            <div className="p-4 bg-brand-panel-soft border border-border-muted rounded-xl">
-              <div className="text-xs font-semibold text-text-primary mb-1">Flush rules manually</div>
-              <code className="block mt-2 px-3 py-2 bg-brand-main rounded-lg text-xs font-mono text-success">
-                sudo nft flush ruleset
-              </code>
-            </div>
-            <div className="p-4 bg-brand-panel-soft border border-border-muted rounded-xl">
-              <div className="text-xs font-semibold text-text-primary mb-1">Restore last backup</div>
-              <code className="block mt-2 px-3 py-2 bg-brand-main rounded-lg text-xs font-mono text-success">
-                sudo nft -f /etc/homeshield/backup.nft
-              </code>
-            </div>
-          </div>
-        </CardBody>
-      </Card>
 
       <Card>
         <CardHeader>
@@ -272,7 +182,7 @@ export function Backup() {
                   <td className="px-4 py-3">
                     <div className="font-medium text-text-primary">{rec.label || 'Untitled'}</div>
                     {rec.description && <div className="text-xs text-text-muted mt-0.5">{rec.description}</div>}
-                    <div className="text-xs font-mono text-text-muted/60 mt-0.5">{rec.checksum?.slice(0, 28)}...</div>
+                    <div className="text-xs font-mono text-text-muted/60 mt-0.5">{rec.checksum?.slice(0, 28)}…</div>
                   </td>
                   <td className="px-4 py-3">
                     <Badge variant={triggerVariant[rec.trigger_type] ?? 'neutral'}>{rec.trigger_type}</Badge>
@@ -281,20 +191,27 @@ export function Backup() {
                   <td className="px-4 py-3">
                     {rec.encrypted
                       ? <span className="flex items-center gap-1 text-xs text-success"><Lock className="w-3 h-3" /> Yes</span>
-                      : <span className="text-xs text-text-muted">No</span>
-                    }
+                      : <span className="text-xs text-text-muted">No</span>}
                   </td>
                   <td className="px-4 py-3 text-text-muted text-xs">
                     <div>{timeAgo(rec.created_at)}</div>
                     <div className="text-text-muted/60">{rec.created_by}</div>
                   </td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      onClick={() => setDeleteId(rec.id)}
-                      className="p-1.5 rounded-lg text-text-muted hover:text-danger hover:bg-danger/10 transition-colors"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button onClick={() => api.download(`backups/${rec.id}/download`)} title="Download"
+                        className="p-1.5 rounded-lg text-text-muted hover:text-info hover:bg-info/10 transition-colors">
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => { setRestore({ id: rec.id, encrypted: rec.encrypted, name: rec.label }); setRestorePass(''); }}
+                        title="Restore" className="p-1.5 rounded-lg text-text-muted hover:text-warning hover:bg-warning/10 transition-colors">
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => setDeleteId(rec.id)} title="Delete"
+                        className="p-1.5 rounded-lg text-text-muted hover:text-danger hover:bg-danger/10 transition-colors">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -303,63 +220,56 @@ export function Backup() {
         </div>
       </Card>
 
-      <Modal open={labelModalOpen} onClose={() => setLabelModalOpen(false)} title="Export Backup" size="sm">
+      {/* Create */}
+      <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Create Backup" size="md">
         <div className="space-y-4">
           <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">Label (optional)</label>
-            <input
-              className="w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-brand-gold/50 focus:ring-1 focus:ring-brand-gold/20 transition-all"
-              value={exportLabel}
-              onChange={e => setExportLabel(e.target.value)}
-              placeholder={`Backup ${new Date().toLocaleDateString()}`}
-            />
+            <label className={lbl}>Label</label>
+            <input className={cls} value={label} onChange={e => setLabel(e.target.value)} placeholder={`Backup ${new Date().toLocaleDateString()}`} />
           </div>
-          <p className="text-xs text-text-muted">
-            Exports firewall policies, DNS entries, NAT rules, and system settings as a JSON file.
-          </p>
+          <div>
+            <label className={lbl}>Description (optional)</label>
+            <input className={cls} value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. before adding new policies" />
+          </div>
+          <div>
+            <label className={lbl}>Encryption passphrase (optional)</label>
+            <input type="password" className={cls} value={createPass} onChange={e => setCreatePass(e.target.value)} placeholder="Leave blank for an unencrypted backup" />
+            <p className="text-xs text-text-muted/60 mt-1">Backups include VPN private keys. Set a passphrase (AES-256-GCM) to protect them — you'll need it to restore.</p>
+          </div>
+          <p className="text-xs text-text-muted">Captures firewall policies, NAT, DNS lists, threat feeds, VPN config and system settings. The file also downloads to your device.</p>
           <div className="flex justify-end gap-3 pt-2 border-t border-border-muted">
-            <Button variant="ghost" onClick={() => setLabelModalOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={() => exportBackup(exportLabel)} loading={exporting}>
-              <Download className="w-4 h-4" /> Export
-            </Button>
+            <Button variant="ghost" onClick={() => setCreateOpen(false)}>Cancel</Button>
+            <Button variant="primary" onClick={createBackup} loading={busy}><Download className="w-4 h-4" /> Create</Button>
           </div>
         </div>
       </Modal>
 
-      <Modal open={importModalOpen} onClose={() => setImportModalOpen(false)} title="Import Backup" size="lg">
+      {/* Restore */}
+      <Modal open={!!restore} onClose={() => setRestore(null)} title="Restore Configuration" size="md">
         <div className="space-y-4">
           <div className="flex items-start gap-2 px-3 py-2.5 bg-warning/10 border border-warning/20 rounded-lg">
             <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
             <p className="text-xs text-warning">
-              Importing will overwrite existing policies and settings that share the same IDs. Existing records not present in the backup will not be removed.
+              This <strong>replaces</strong> all policies, NAT rules, DNS lists, threat feeds, VPN config and settings
+              with the contents of <strong>{restore?.name}</strong>. Current configuration not in the backup will be removed.
             </p>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-text-muted mb-1">Paste backup JSON</label>
-            <textarea
-              rows={10}
-              className="w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-xs font-mono text-text-primary placeholder-text-muted focus:outline-none focus:border-brand-gold/50 focus:ring-1 focus:ring-brand-gold/20 transition-all resize-none"
-              placeholder='{"version":"1.0","exported_at":"...","firewall_policies":[...]}'
-              value={importText}
-              onChange={e => setImportText(e.target.value)}
-            />
-          </div>
-          {importError && (
-            <div className="flex items-center gap-2 text-xs text-danger">
-              <AlertTriangle className="w-3.5 h-3.5" /> {importError}
+          {restore?.encrypted && (
+            <div>
+              <label className={lbl}>Decryption passphrase</label>
+              <input type="password" className={cls} value={restorePass} onChange={e => setRestorePass(e.target.value)} autoFocus />
             </div>
           )}
           <div className="flex justify-end gap-3 pt-2 border-t border-border-muted">
-            <Button variant="ghost" onClick={() => setImportModalOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={importBackup} loading={importing}>
-              <Upload className="w-4 h-4" /> Restore
-            </Button>
+            <Button variant="ghost" onClick={() => setRestore(null)}>Cancel</Button>
+            <Button variant="danger" onClick={runRestore} loading={busy}><RotateCcw className="w-4 h-4" /> Restore &amp; Replace</Button>
           </div>
         </div>
       </Modal>
 
+      {/* Delete */}
       <Modal open={!!deleteId} onClose={() => setDeleteId(null)} title="Delete Backup" size="sm">
-        <p className="text-sm text-text-secondary">Delete this backup record? The local file will not be affected.</p>
+        <p className="text-sm text-text-secondary">Delete this backup record? Any file you already downloaded is unaffected.</p>
         <div className="flex justify-end gap-3 mt-6">
           <Button variant="ghost" onClick={() => setDeleteId(null)}>Cancel</Button>
           <Button variant="danger" onClick={() => deleteId && deleteRecord(deleteId)}>Delete</Button>

@@ -324,5 +324,27 @@ export const api = {
   async del<T = unknown>(path: string) {
     return apiFetch<T>(path, { method: 'DELETE' });
   },
+  // Fetches a file response (with auth) and triggers a browser download.
+  async download(path: string, fallbackName = 'download') {
+    const token = getToken();
+    const res = await fetch(`${API_BASE}/${path}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      return { error: err.error || `HTTP ${res.status}` };
+    }
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : fallbackName;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    return { error: null };
+  },
   auth,
 };

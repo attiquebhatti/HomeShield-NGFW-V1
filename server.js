@@ -8,6 +8,7 @@ import bcrypt from 'bcryptjs';
 import QRCode from 'qrcode';
 import { parseFeed } from './feeds.mjs';
 import { generateKeyPair, derivePublicKey, generatePresharedKey, nextPeerAddress, buildClientConfig } from './wireguard.mjs';
+import { buildEnvelope, readEnvelope, sha256 } from './backup.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -634,6 +635,154 @@ api.get('/vpn-peers/:id/config', async (req, res) => {
     res.json({ data: { config, qr } });
   } catch (e) {
     serverError(res, 'vpn-peers config', e);
+  }
+});
+
+// ─── Backup & Restore ──────────────────────────────────────────────────────
+// Config tables captured in a backup and their restorable columns. Order
+// matters for restore (independent tables; full replace each).
+
+const BACKUP_TABLES = {
+  firewall_policies: ['id', 'name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'created_at', 'updated_at'],
+  nat_rules: ['id', 'name', 'description', 'enabled', 'nat_type', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'translate_to_ip', 'translate_to_port', 'interface', 'priority', 'created_at', 'updated_at'],
+  dns_entries: ['id', 'domain', 'list_type', 'category', 'source', 'enabled', 'note', 'created_at'],
+  threat_feeds: ['id', 'name', 'description', 'url', 'feed_type', 'enabled', 'last_updated', 'last_status', 'indicator_count', 'refresh_interval_hours', 'created_at'],
+  vpn_server: ['id', 'interface', 'private_key', 'public_key', 'listen_port', 'address', 'endpoint', 'dns', 'enabled', 'created_at', 'updated_at'],
+  vpn_peers: ['id', 'name', 'public_key', 'private_key', 'preshared_key', 'address', 'allowed_ips', 'enabled', 'last_handshake', 'rx_bytes', 'tx_bytes', 'created_at'],
+  system_settings: ['key', 'value', 'description', 'updated_at'],
+};
+
+const JSON_BACKUP_COLS = new Set(['tags']);
+
+async function gatherBackupConfig() {
+  const config = {};
+  for (const table of Object.keys(BACKUP_TABLES)) {
+    config[table] = castRows(await query(`SELECT * FROM \`${table}\``));
+  }
+  return config;
+}
+
+// List backups (without the heavy payload column).
+api.get('/backups', async (_req, res) => {
+  try {
+    const rows = await query(
+      `SELECT id, created_at, created_by, label, description, trigger_type, size_bytes, encrypted, checksum
+       FROM backup_records ORDER BY created_at DESC`
+    );
+    res.json({ data: castRows(rows), count: rows.length });
+  } catch (e) {
+    serverError(res, 'backups list', e);
+  }
+});
+
+// Create a backup of the current configuration.
+api.post('/backups', async (req, res) => {
+  try {
+    const { label, description, passphrase } = req.body || {};
+    const config = await gatherBackupConfig();
+    const envelope = buildEnvelope(config, { passphrase: passphrase || undefined });
+    const id = randomUUID();
+    const counts = Object.fromEntries(Object.entries(config).map(([k, v]) => [k, v.length]));
+    await query(
+      `INSERT INTO backup_records (id, created_at, created_by, label, description, trigger_type, size_bytes, encrypted, payload, checksum)
+       VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?)`,
+      [id, now(), req.user.email || 'admin', label || `Backup ${new Date().toISOString().slice(0, 10)}`,
+       description || '', Buffer.byteLength(envelope), passphrase ? 1 : 0, envelope, sha256(envelope)]
+    );
+    await query(
+      'INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [randomUUID(), now(), req.user.email || 'admin', 'backup_create', 'backup', id, JSON.stringify(counts), req.ip || '']
+    );
+    const rows = await query(
+      `SELECT id, created_at, created_by, label, description, trigger_type, size_bytes, encrypted, checksum
+       FROM backup_records WHERE id = ? LIMIT 1`, [id]
+    );
+    res.status(201).json({ data: castRow(rows[0]) });
+  } catch (e) {
+    serverError(res, 'backup create', e);
+  }
+});
+
+// Download a backup's envelope as a file.
+api.get('/backups/:id/download', async (req, res) => {
+  try {
+    const rows = await query('SELECT label, payload FROM backup_records WHERE id = ? LIMIT 1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const name = (rows[0].label || 'backup').replace(/[^a-z0-9]/gi, '_').slice(0, 40);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="homeshield-${name}.json"`);
+    res.send(rows[0].payload);
+  } catch (e) {
+    serverError(res, 'backup download', e);
+  }
+});
+
+// Restore configuration from a stored backup id or an uploaded payload.
+api.post('/backups/restore', async (req, res) => {
+  try {
+    const { id, payload, passphrase } = req.body || {};
+    let envelopeStr = payload;
+    if (id) {
+      const rows = await query('SELECT payload FROM backup_records WHERE id = ? LIMIT 1', [id]);
+      if (!rows.length) return res.status(404).json({ error: 'Backup not found' });
+      envelopeStr = rows[0].payload;
+    }
+    if (!envelopeStr) return res.status(400).json({ error: 'Provide a backup id or payload' });
+
+    let config;
+    try {
+      config = readEnvelope(envelopeStr, passphrase);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    const conn = await getPool().getConnection();
+    const restored = {};
+    try {
+      await conn.beginTransaction();
+      for (const [table, cols] of Object.entries(BACKUP_TABLES)) {
+        const rows = config[table];
+        if (!Array.isArray(rows)) continue;
+        await conn.execute(`DELETE FROM \`${table}\``);
+        for (const row of rows) {
+          const data = {};
+          for (const col of cols) {
+            if (row[col] === undefined) continue;
+            data[col] = JSON_BACKUP_COLS.has(col) && row[col] !== null && typeof row[col] === 'object'
+              ? JSON.stringify(row[col])
+              : row[col];
+          }
+          if (!Object.keys(data).length) continue;
+          const names = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+          const placeholders = Object.keys(data).map(() => '?').join(', ');
+          await conn.execute(`INSERT INTO \`${table}\` (${names}) VALUES (${placeholders})`, Object.values(data));
+        }
+        restored[table] = rows.length;
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    await query(
+      'INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [randomUUID(), now(), req.user.email || 'admin', 'backup_restore', 'backup', id || null, JSON.stringify(restored), req.ip || '']
+    );
+    res.json({ data: { restored } });
+  } catch (e) {
+    serverError(res, 'backup restore', e);
+  }
+});
+
+api.delete('/backups/:id', async (req, res) => {
+  try {
+    await query('DELETE FROM backup_records WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'backup delete', e);
   }
 });
 

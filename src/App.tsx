@@ -15,6 +15,7 @@ import { Applications } from './pages/Applications';
 import { ThreatFeeds } from './pages/ThreatFeeds';
 import { GeoIp } from './pages/GeoIp';
 import { Vpn } from './pages/Vpn';
+import { Devices } from './pages/Devices';
 import { Interfaces } from './pages/Interfaces';
 import { AuditLog } from './pages/AuditLog';
 import { Backup } from './pages/Backup';
@@ -100,6 +101,7 @@ function AppRoutes() {
         <Route path="threat-feeds" element={<ThreatFeeds />} />
         <Route path="geoip" element={<GeoIp />} />
         <Route path="vpn" element={<Vpn />} />
+        <Route path="devices" element={<Devices />} />
         <Route path="interfaces" element={<Interfaces />} />
         <Route path="audit" element={<AuditLog />} />
         <Route path="backup" element={<Backup />} />

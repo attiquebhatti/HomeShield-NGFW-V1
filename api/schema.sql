@@ -280,6 +280,20 @@ CREATE TABLE IF NOT EXISTS vpn_peers (
   INDEX idx_public_key (public_key)
 );
 
+CREATE TABLE IF NOT EXISTS devices (
+  id VARCHAR(36) PRIMARY KEY,
+  hostname VARCHAR(255) DEFAULT '',
+  os ENUM('windows','linux','macos','unknown') DEFAULT 'unknown',
+  os_version VARCHAR(150) DEFAULT '',
+  agent_version VARCHAR(50) DEFAULT '',
+  ip_address VARCHAR(50) DEFAULT '',
+  tags JSON,
+  enrolled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_last_seen (last_seen),
+  INDEX idx_os (os)
+);
+
 CREATE TABLE IF NOT EXISTS ipsec_server (
   id VARCHAR(36) PRIMARY KEY,
   enabled TINYINT(1) DEFAULT 0,

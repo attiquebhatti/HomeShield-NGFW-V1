@@ -854,6 +854,30 @@ api.get('/ipsec-client-script', async (_req, res) => {
   }
 });
 
+// ─── Devices (inventory) ───────────────────────────────────────────────────
+
+api.get('/devices', async (_req, res) => {
+  try {
+    const rows = await query(
+      `SELECT id, hostname, os, os_version, agent_version, ip_address, tags, enrolled_at, last_seen,
+              (last_seen >= DATE_SUB(NOW(), INTERVAL 2 MINUTE)) AS online
+       FROM devices ORDER BY last_seen DESC`
+    );
+    res.json({ data: castRows(rows), count: rows.length });
+  } catch (e) {
+    serverError(res, 'devices list', e);
+  }
+});
+
+api.delete('/devices/:id', async (req, res) => {
+  try {
+    await query('DELETE FROM devices WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'devices delete', e);
+  }
+});
+
 // ─── WireGuard VPN ───────────────────────────────────────────────────────
 
 const VPN_SERVER_FIELDS = ['interface', 'listen_port', 'address', 'endpoint', 'dns', 'enabled'];
@@ -1411,6 +1435,45 @@ agent.get('/geoip-config', async (_req, res) => {
   }
 });
 
+// Device registration / heartbeat. Agents upsert their identity each cycle.
+agent.post('/register', async (req, res) => {
+  try {
+    const { device_id, hostname, os, os_version, agent_version, ip_address } = req.body || {};
+    if (!device_id) return res.status(400).json({ error: 'device_id required' });
+    const osVal = ['windows', 'linux', 'macos'].includes(os) ? os : 'unknown';
+    await query(
+      `INSERT INTO devices (id, hostname, os, os_version, agent_version, ip_address, enrolled_at, last_seen)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE hostname = VALUES(hostname), os = VALUES(os),
+         os_version = VALUES(os_version), agent_version = VALUES(agent_version),
+         ip_address = VALUES(ip_address), last_seen = VALUES(last_seen)`,
+      [device_id, hostname || '', osVal, os_version || '', agent_version || '', ip_address || '', now(), now()]
+    );
+    res.json({ success: true, device_id });
+  } catch (e) {
+    serverError(res, 'agent register', e);
+  }
+});
+
+// IKEv2 client provisioning data for a Windows/macOS agent (the road-warrior
+// side): endpoint + CA so the agent can create the native VPN connection.
+agent.get('/vpn-client', async (_req, res) => {
+  try {
+    const server = await getOrCreateIpsecServer();
+    res.json({
+      data: {
+        enabled: server.enabled === 1 && !!server.ca_cert,
+        name: 'HomeShield VPN',
+        endpoint: server.endpoint,
+        ca_cert: server.ca_cert || '',
+        full_tunnel: (server.local_subnets || '0.0.0.0/0').trim() === '0.0.0.0/0',
+      },
+    });
+  } catch (e) {
+    serverError(res, 'agent vpn-client', e);
+  }
+});
+
 // IPSec/IKEv2 config for the agent: server settings + EAP users.
 agent.get('/ipsec-config', async (_req, res) => {
   try {
@@ -1643,6 +1706,19 @@ async function ensureVpnTables() {
       bytes BIGINT DEFAULT 0,
       INDEX idx_timestamp (timestamp),
       INDEX idx_application (application)
+    )`);
+    await getPool().query(`CREATE TABLE IF NOT EXISTS devices (
+      id VARCHAR(36) PRIMARY KEY,
+      hostname VARCHAR(255) DEFAULT '',
+      os ENUM('windows','linux','macos','unknown') DEFAULT 'unknown',
+      os_version VARCHAR(150) DEFAULT '',
+      agent_version VARCHAR(50) DEFAULT '',
+      ip_address VARCHAR(50) DEFAULT '',
+      tags JSON,
+      enrolled_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_last_seen (last_seen),
+      INDEX idx_os (os)
     )`);
     await getPool().query(`CREATE TABLE IF NOT EXISTS ipsec_server (
       id VARCHAR(36) PRIMARY KEY,

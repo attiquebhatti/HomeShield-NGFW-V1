@@ -134,6 +134,35 @@ are stored and counted but not yet enforced (domain feeds → DNS sinkhole is a
 planned follow-up). Good starter feeds: abuse.ch Feodo Tracker, Emerging
 Threats compromised IPs, Spamhaus DROP.
 
+## WireGuard VPN
+
+Configure the server and peers on the VPN page. The **server** generates all
+keypairs and assigns tunnel addresses; each peer gets a client config and QR
+code (scan with the WireGuard mobile app). The **agent** applies the server
+config on the firewall machine.
+
+Requirements on the firewall machine: `wireguard-tools` (`wg`, `wg-quick`).
+
+When the VPN is enabled, the agent each config cycle:
+
+- Writes `/etc/wireguard/<iface>.conf` (mode 600) and brings the interface up
+  with `wg-quick`, or live-updates peers with `wg syncconf` if already up (so
+  adding/removing a peer doesn't drop existing tunnels).
+- Enables `net.ipv4.ip_forward` and installs a masquerade table
+  (`homeshield_vpn`) so clients reach the internet.
+- Reports per-peer handshake and transfer stats (`wg show dump`) back to the
+  VPN page.
+
+**Open the listen port:** add an inbound `allow` firewall policy for the
+WireGuard UDP port (default 51820) on the WAN interface, and make sure your
+router forwards that port to the firewall machine. Set the **Public Endpoint**
+to your public IP or dynamic-DNS hostname so client configs know where to
+connect.
+
+Note: client private keys are generated and stored server-side for QR/config
+convenience (as consumer VPN routers do). Keep the database and config exports
+protected accordingly.
+
 ## Requirements
 
 - Linux with nftables (`nft`) and iproute2 (`ip`)

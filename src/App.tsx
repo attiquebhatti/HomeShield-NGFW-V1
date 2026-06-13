@@ -12,6 +12,7 @@ import { Nat } from './pages/Nat';
 import { DnsFiltering } from './pages/DnsFiltering';
 import { IdsAlerts } from './pages/IdsAlerts';
 import { ThreatFeeds } from './pages/ThreatFeeds';
+import { Vpn } from './pages/Vpn';
 import { Interfaces } from './pages/Interfaces';
 import { AuditLog } from './pages/AuditLog';
 import { Backup } from './pages/Backup';
@@ -137,6 +138,7 @@ function AppRoutes() {
         <Route path="dns" element={<DnsFiltering />} />
         <Route path="ids" element={<IdsAlerts />} />
         <Route path="threat-feeds" element={<ThreatFeeds />} />
+        <Route path="vpn" element={<Vpn />} />
         <Route path="interfaces" element={<Interfaces />} />
         <Route path="audit" element={<AuditLog />} />
         <Route path="backup" element={<Backup />} />

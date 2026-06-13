@@ -287,6 +287,32 @@ export interface RuleApplyHistory {
   compiled_output: string;
 }
 
+export interface VpnServer {
+  id: string;
+  interface: string;
+  public_key: string;
+  listen_port: number;
+  address: string;
+  endpoint: string;
+  dns: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VpnPeer {
+  id: string;
+  name: string;
+  public_key: string;
+  address: string;
+  allowed_ips: string;
+  enabled: boolean;
+  last_handshake: string | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  created_at: string;
+}
+
 export interface SystemHealthSnapshot {
   id: string;
   recorded_at: string;

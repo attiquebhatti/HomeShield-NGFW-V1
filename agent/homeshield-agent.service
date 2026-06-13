@@ -18,7 +18,8 @@ User=root
 NoNewPrivileges=yes
 ProtectSystem=full
 ProtectHome=yes
-ReadWritePaths=/var/lib/homeshield
+# /etc/wireguard is writable so the agent can manage WireGuard configs
+ReadWritePaths=/var/lib/homeshield /etc/wireguard
 
 [Install]
 WantedBy=multi-user.target

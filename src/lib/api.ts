@@ -299,12 +299,30 @@ export const api = {
     const resource = TABLE_MAP[tableName] ?? tableName.replace(/_/g, '-');
     return new Table<T>(resource);
   },
-  // Calls a custom action endpoint, e.g. post('threat-feeds/<id>/refresh').
+  // Generic helpers for custom (non-table) endpoints, e.g. the VPN API.
+  async get<T = unknown>(path: string) {
+    return apiFetch<T>(path);
+  },
   async post<T = unknown>(path: string, body?: unknown) {
     return apiFetch<T>(path, {
       method: 'POST',
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+  },
+  async put<T = unknown>(path: string, body?: unknown) {
+    return apiFetch<T>(path, {
+      method: 'PUT',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  },
+  async patch<T = unknown>(path: string, body?: unknown) {
+    return apiFetch<T>(path, {
+      method: 'PATCH',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  },
+  async del<T = unknown>(path: string) {
+    return apiFetch<T>(path, { method: 'DELETE' });
   },
   auth,
 };

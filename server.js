@@ -5,7 +5,9 @@ import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
+import QRCode from 'qrcode';
 import { parseFeed } from './feeds.mjs';
+import { generateKeyPair, derivePublicKey, generatePresharedKey, nextPeerAddress, buildClientConfig } from './wireguard.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -510,6 +512,125 @@ api.delete('/threat-feeds/:id', async (req, res) => {
   }
 });
 
+// ─── WireGuard VPN ───────────────────────────────────────────────────────
+
+const VPN_SERVER_FIELDS = ['interface', 'listen_port', 'address', 'endpoint', 'dns', 'enabled'];
+
+// Server config (private key never leaves the server).
+api.get('/vpn-server', async (_req, res) => {
+  try {
+    const server = await getOrCreateVpnServer();
+    const { private_key, ...safe } = server;
+    res.json({ data: castRow(safe) });
+  } catch (e) {
+    serverError(res, 'vpn-server get', e);
+  }
+});
+
+api.put('/vpn-server', async (req, res) => {
+  try {
+    await getOrCreateVpnServer();
+    const data = {};
+    for (const f of VPN_SERVER_FIELDS) {
+      if (req.body[f] !== undefined) data[f] = f === 'enabled' ? (req.body[f] ? 1 : 0) : req.body[f];
+    }
+    if (Object.keys(data).length) {
+      data.updated_at = now();
+      const sets = Object.keys(data).map(c => `\`${safeName(c)}\` = ?`).join(', ');
+      await query(`UPDATE vpn_server SET ${sets}`, Object.values(data));
+    }
+    const server = await getOrCreateVpnServer();
+    const { private_key, ...safe } = server;
+    res.json({ data: castRow(safe) });
+  } catch (e) {
+    serverError(res, 'vpn-server put', e);
+  }
+});
+
+// List peers (secrets omitted; fetch the full config via /config).
+api.get('/vpn-peers', async (_req, res) => {
+  try {
+    const rows = await query(
+      `SELECT id, name, public_key, address, allowed_ips, enabled, last_handshake, rx_bytes, tx_bytes, created_at
+       FROM vpn_peers ORDER BY created_at ASC`
+    );
+    res.json({ data: castRows(rows), count: rows.length });
+  } catch (e) {
+    serverError(res, 'vpn-peers list', e);
+  }
+});
+
+// Create a peer: generate its keypair, allocate the next tunnel address.
+api.post('/vpn-peers', async (req, res) => {
+  try {
+    const name = (req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Peer name is required' });
+
+    const server = await getOrCreateVpnServer();
+    const used = (await query('SELECT address FROM vpn_peers')).map(r => r.address);
+    let address;
+    try {
+      address = nextPeerAddress(server.address, used);
+    } catch (e) {
+      return res.status(409).json({ error: e.message });
+    }
+
+    const { privateKey, publicKey } = generateKeyPair();
+    const id = randomUUID();
+    await query(
+      `INSERT INTO vpn_peers (id, name, public_key, private_key, preshared_key, address, allowed_ips, enabled, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      [id, name, publicKey, privateKey, generatePresharedKey(), address,
+       req.body.allowed_ips || '0.0.0.0/0', now()]
+    );
+    const rows = await query(
+      `SELECT id, name, public_key, address, allowed_ips, enabled, last_handshake, rx_bytes, tx_bytes, created_at
+       FROM vpn_peers WHERE id = ? LIMIT 1`, [id]
+    );
+    res.status(201).json({ data: castRow(rows[0]) });
+  } catch (e) {
+    serverError(res, 'vpn-peers create', e);
+  }
+});
+
+api.patch('/vpn-peers/:id', async (req, res) => {
+  try {
+    const data = {};
+    if (req.body.name !== undefined) data.name = req.body.name;
+    if (req.body.allowed_ips !== undefined) data.allowed_ips = req.body.allowed_ips;
+    if (req.body.enabled !== undefined) data.enabled = req.body.enabled ? 1 : 0;
+    if (!Object.keys(data).length) return res.status(400).json({ error: 'No updatable fields' });
+    const sets = Object.keys(data).map(c => `\`${safeName(c)}\` = ?`).join(', ');
+    await query(`UPDATE vpn_peers SET ${sets} WHERE id = ?`, [...Object.values(data), req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'vpn-peers update', e);
+  }
+});
+
+api.delete('/vpn-peers/:id', async (req, res) => {
+  try {
+    await query('DELETE FROM vpn_peers WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'vpn-peers delete', e);
+  }
+});
+
+// Client config text + QR data URL for a peer.
+api.get('/vpn-peers/:id/config', async (req, res) => {
+  try {
+    const server = await getOrCreateVpnServer();
+    const rows = await query('SELECT * FROM vpn_peers WHERE id = ? LIMIT 1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const config = buildClientConfig(server, rows[0]);
+    const qr = await QRCode.toDataURL(config, { errorCorrectionLevel: 'M', margin: 1, width: 320 });
+    res.json({ data: { config, qr } });
+  } catch (e) {
+    serverError(res, 'vpn-peers config', e);
+  }
+});
+
 for (const resource of CRUD_RESOURCES) {
   api.get(`/${resource}`, (req, res) => listRows(resource, req, res));
   api.get(`/${resource}/:id`, (req, res) => getRow(resource, req.params.id, res));
@@ -734,6 +855,45 @@ agent.get('/threat-set', async (_req, res) => {
   }
 });
 
+// WireGuard config for the agent: server settings + enabled peers.
+agent.get('/vpn-config', async (_req, res) => {
+  try {
+    const server = await getOrCreateVpnServer();
+    const peers = await query(
+      'SELECT public_key, preshared_key, address FROM vpn_peers WHERE enabled = 1'
+    );
+    res.json({
+      data: {
+        enabled: server.enabled === 1,
+        interface: server.interface,
+        private_key: server.private_key,
+        listen_port: server.listen_port,
+        address: server.address,
+        peers: castRows(peers),
+      },
+    });
+  } catch (e) {
+    serverError(res, 'agent vpn-config', e);
+  }
+});
+
+// Peer telemetry from `wg show dump`: handshake and transfer counters.
+agent.post('/vpn-telemetry', async (req, res) => {
+  try {
+    const peers = Array.isArray(req.body?.peers) ? req.body.peers : [];
+    for (const p of peers) {
+      if (!p.public_key) continue;
+      await query(
+        'UPDATE vpn_peers SET last_handshake = ?, rx_bytes = ?, tx_bytes = ? WHERE public_key = ?',
+        [p.last_handshake || null, p.rx_bytes || 0, p.tx_bytes || 0, p.public_key]
+      );
+    }
+    res.json({ updated: peers.length });
+  } catch (e) {
+    serverError(res, 'agent vpn-telemetry', e);
+  }
+});
+
 // Bulk IDS/IPS alert ingestion from Suricata eve.json (max 500 per request).
 agent.post('/ids-alerts', async (req, res) => {
   try {
@@ -819,6 +979,58 @@ if (existsSync(distDir)) {
 } else {
   console.warn('dist/ not found — frontend not available');
   app.get('*', (_req, res) => res.status(503).send('Run npm run build first'));
+}
+
+// Creates tables added after the initial schema on existing databases
+// (auto-migrate only runs the full schema on first install). Idempotent.
+async function ensureVpnTables() {
+  try {
+    await getPool().query(`CREATE TABLE IF NOT EXISTS vpn_server (
+      id VARCHAR(36) PRIMARY KEY,
+      interface VARCHAR(50) DEFAULT 'wg0',
+      private_key VARCHAR(64) DEFAULT '',
+      public_key VARCHAR(64) DEFAULT '',
+      listen_port INT DEFAULT 51820,
+      address VARCHAR(50) DEFAULT '10.8.0.1/24',
+      endpoint VARCHAR(255) DEFAULT '',
+      dns VARCHAR(100) DEFAULT '1.1.1.1',
+      enabled TINYINT(1) DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await getPool().query(`CREATE TABLE IF NOT EXISTS vpn_peers (
+      id VARCHAR(36) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      public_key VARCHAR(64) DEFAULT '',
+      private_key VARCHAR(64) DEFAULT '',
+      preshared_key VARCHAR(64) DEFAULT '',
+      address VARCHAR(50) DEFAULT '',
+      allowed_ips VARCHAR(255) DEFAULT '0.0.0.0/0',
+      enabled TINYINT(1) DEFAULT 1,
+      last_handshake DATETIME NULL,
+      rx_bytes BIGINT DEFAULT 0,
+      tx_bytes BIGINT DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_public_key (public_key)
+    )`);
+  } catch (e) {
+    console.error('ensureVpnTables failed:', e.message);
+  }
+}
+
+// Returns the single VPN server row, creating it (with a fresh keypair) on
+// first access.
+async function getOrCreateVpnServer() {
+  const rows = await query('SELECT * FROM vpn_server LIMIT 1');
+  if (rows.length) return rows[0];
+  const { privateKey, publicKey } = generateKeyPair();
+  const id = randomUUID();
+  await query(
+    'INSERT INTO vpn_server (id, private_key, public_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+    [id, privateKey, publicKey, now(), now()]
+  );
+  const created = await query('SELECT * FROM vpn_server WHERE id = ? LIMIT 1', [id]);
+  return created[0];
 }
 
 // Inserts any missing default settings on existing databases (auto-migrate
@@ -970,6 +1182,7 @@ async function refreshDueFeeds() {
 // ─── Start ─────────────────────────────────────────────────────────────────
 
 autoMigrate().then(() => {
+  ensureVpnTables();
   ensureDefaultSettings();
   pruneOldLogs();
   setInterval(pruneOldLogs, 24 * 60 * 60 * 1000);

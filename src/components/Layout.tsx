@@ -4,7 +4,7 @@ import {
   Shield, LayoutDashboard, FileText, Globe, AlertTriangle,
   Network, Settings, ChevronLeft, ChevronRight,
   Activity, Map, Rss, BookOpen, Menu, Bell,
-  HardDrive, LogOut
+  HardDrive, LogOut, Lock
 } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 
@@ -17,6 +17,7 @@ const navItems = [
   { to: '/dns', label: 'DNS Filtering', icon: Globe },
   { to: '/ids', label: 'IDS / Alerts', icon: AlertTriangle },
   { to: '/threat-feeds', label: 'Threat Feeds', icon: Rss },
+  { to: '/vpn', label: 'VPN', icon: Lock },
   { to: '/interfaces', label: 'Interfaces', icon: Network },
   { to: '/audit', label: 'Audit Log', icon: BookOpen },
   { to: '/backup', label: 'Backup & Restore', icon: HardDrive },

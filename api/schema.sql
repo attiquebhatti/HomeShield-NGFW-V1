@@ -241,6 +241,36 @@ CREATE TABLE IF NOT EXISTS rule_apply_history (
   compiled_output LONGTEXT DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS vpn_server (
+  id VARCHAR(36) PRIMARY KEY,
+  interface VARCHAR(50) DEFAULT 'wg0',
+  private_key VARCHAR(64) DEFAULT '',
+  public_key VARCHAR(64) DEFAULT '',
+  listen_port INT DEFAULT 51820,
+  address VARCHAR(50) DEFAULT '10.8.0.1/24',
+  endpoint VARCHAR(255) DEFAULT '',
+  dns VARCHAR(100) DEFAULT '1.1.1.1',
+  enabled TINYINT(1) DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS vpn_peers (
+  id VARCHAR(36) PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  public_key VARCHAR(64) DEFAULT '',
+  private_key VARCHAR(64) DEFAULT '',
+  preshared_key VARCHAR(64) DEFAULT '',
+  address VARCHAR(50) DEFAULT '',
+  allowed_ips VARCHAR(255) DEFAULT '0.0.0.0/0',
+  enabled TINYINT(1) DEFAULT 1,
+  last_handshake DATETIME NULL,
+  rx_bytes BIGINT DEFAULT 0,
+  tx_bytes BIGINT DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_public_key (public_key)
+);
+
 CREATE TABLE IF NOT EXISTS system_health_snapshots (
   id VARCHAR(36) PRIMARY KEY,
   recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -30,6 +30,7 @@ import { parseKernelLogLine, parseConntrack, splitJournalOutput } from './parser
 import { parseQuery, buildBlockResponse, createMatcher, sinkholeAddress } from './dns.mjs';
 import { parseEveAlert, buildIpsTable } from './ips.mjs';
 import { buildThreatTable, splitByFamily } from './threats.mjs';
+import { buildServerConfig, buildVpnNatTable, parseWgDump } from './wg.mjs';
 
 const exec = promisify(execFile);
 
@@ -528,6 +529,81 @@ async function refreshThreatSet() {
   threatTableActive = true;
 }
 
+// ─── WireGuard VPN ─────────────────────────────────────────────────────────
+// Applies the WireGuard server config and a masquerade table so clients reach
+// the internet. Uses `wg syncconf` for live peer updates when the interface is
+// already up, falling back to `wg-quick up`. Reports peer telemetry.
+
+let vpnUp = false;
+let vpnInterface = 'wg0';
+
+async function wgInterfaceExists(iface) {
+  try {
+    await exec('wg', ['show', iface]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function applyVpn(config) {
+  vpnInterface = config.interface || 'wg0';
+  const confPath = `/etc/wireguard/${vpnInterface}.conf`;
+  const serverConfig = buildServerConfig(config, config.peers || []);
+  await writeFile(confPath, serverConfig, { mode: 0o600 });
+
+  // Enable IPv4 forwarding for routing client traffic.
+  await exec('sysctl', ['-w', 'net.ipv4.ip_forward=1']).catch(() => {});
+
+  if (await wgInterfaceExists(vpnInterface)) {
+    // Live-update peers without dropping the tunnel.
+    const { stdout } = await exec('wg-quick', ['strip', vpnInterface]);
+    const stripped = join(STATE_DIR, `${vpnInterface}.stripped.conf`);
+    await writeFile(stripped, stdout, { mode: 0o600 });
+    await exec('wg', ['syncconf', vpnInterface, stripped]);
+  } else {
+    await exec('wg-quick', ['up', vpnInterface]);
+  }
+
+  // Masquerade so VPN clients can reach the internet.
+  const natFile = join(STATE_DIR, 'vpn-nat.nft');
+  await writeFile(natFile, buildVpnNatTable(config.address), 'utf8');
+  await exec('nft', ['-f', natFile]);
+
+  if (!vpnUp) log(`WireGuard up on ${vpnInterface} (${(config.peers || []).length} peers)`);
+  vpnUp = true;
+}
+
+async function teardownVpn() {
+  try { await exec('wg-quick', ['down', vpnInterface]); } catch {}
+  try { await exec('nft', ['delete', 'table', 'inet', 'homeshield_vpn']); } catch {}
+  vpnUp = false;
+  log('WireGuard down');
+}
+
+async function refreshVpn() {
+  const config = await api('/vpn-config');
+  if (config.enabled) {
+    await applyVpn(config);
+  } else if (vpnUp) {
+    await teardownVpn();
+  }
+}
+
+async function sendVpnTelemetry() {
+  if (!vpnUp) return;
+  let stdout;
+  try {
+    ({ stdout } = await exec('wg', ['show', vpnInterface, 'dump']));
+  } catch {
+    return; // interface not present
+  }
+  const peers = parseWgDump(stdout);
+  if (peers.length) {
+    await api('/vpn-telemetry', { method: 'POST', body: JSON.stringify({ peers }) });
+  }
+}
+
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
 async function main() {
@@ -575,6 +651,11 @@ async function main() {
       } catch (e) {
         log('Threat set refresh error:', e.message);
       }
+      try {
+        await refreshVpn();
+      } catch (e) {
+        log('VPN refresh error:', e.message);
+      }
       lastConfigRefresh = Date.now();
     }
 
@@ -590,6 +671,11 @@ async function main() {
         lastTelemetry = Date.now();
       } catch (e) {
         log('Telemetry error:', e.message);
+      }
+      try {
+        await sendVpnTelemetry();
+      } catch (e) {
+        log('VPN telemetry error:', e.message);
       }
     }
 

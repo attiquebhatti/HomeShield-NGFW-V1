@@ -4,13 +4,16 @@ import { api, getToken } from './api';
 interface AuthUser {
   id: string;
   email: string;
+  role: 'admin' | 'operator' | 'viewer';
+  mfa_enabled?: boolean;
 }
 
 interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
   configured: boolean;
-  signIn: (email: string, password: string) => Promise<{ error: string | null }>;
+  signIn: (email: string, password: string, code?: string) => Promise<{ error: string | null; mfaRequired: boolean }>;
+  refreshUser: () => Promise<void>;
   signOut: () => void;
 }
 
@@ -31,12 +34,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
-  async function signIn(email: string, password: string): Promise<{ error: string | null }> {
-    const res = await api.auth.signIn(email, password);
-    if (res.error) return { error: res.error };
-    const u = (res.data as any)?.user ?? null;
+  async function signIn(email: string, password: string, code?: string): Promise<{ error: string | null; mfaRequired: boolean }> {
+    const res = await api.auth.signIn(email, password, code);
+    if (res.error) return { error: res.error, mfaRequired: res.mfaRequired };
+    const u = await api.auth.getUser();
     setUser(u);
-    return { error: null };
+    return { error: null, mfaRequired: false };
+  }
+
+  async function refreshUser() {
+    setUser(await api.auth.getUser());
   }
 
   function signOut() {
@@ -45,7 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, configured: true, signIn, signOut }}>
+    <AuthContext.Provider value={{ user, loading, configured: true, signIn, refreshUser, signOut }}>
       {children}
     </AuthContext.Provider>
   );

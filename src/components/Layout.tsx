@@ -4,7 +4,7 @@ import {
   Shield, LayoutDashboard, FileText, Globe, AlertTriangle,
   Network, Settings, ChevronLeft, ChevronRight,
   Activity, Map, Rss, BookOpen, Menu, Bell,
-  HardDrive, LogOut, Lock, AppWindow, Globe2
+  HardDrive, LogOut, Lock, AppWindow, Globe2, UserCircle, UsersRound
 } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 
@@ -23,6 +23,8 @@ const navItems = [
   { to: '/interfaces', label: 'Interfaces', icon: Network },
   { to: '/audit', label: 'Audit Log', icon: BookOpen },
   { to: '/backup', label: 'Backup & Restore', icon: HardDrive },
+  { to: '/users', label: 'Users & Access', icon: UsersRound, adminOnly: true },
+  { to: '/account', label: 'Account', icon: UserCircle },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -32,6 +34,7 @@ export function Layout() {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
+  const visibleNav = navItems.filter(item => !item.adminOnly || user?.role === 'admin');
 
   async function handleSignOut() {
     await signOut();
@@ -69,7 +72,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 py-3 overflow-y-auto overflow-x-hidden">
-          {navItems.map(({ to, label, icon: Icon, end }) => (
+          {visibleNav.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}
@@ -147,8 +150,14 @@ export function Layout() {
                   <div className="absolute right-0 mt-2 w-52 bg-brand-panel border border-border-strong rounded-xl shadow-panel-lg z-20 py-1 overflow-hidden animate-fade-in">
                     <div className="px-4 py-3 border-b border-border-muted">
                       <div className="text-xs font-medium text-text-primary truncate">{user?.email}</div>
-                      <div className="text-xs text-text-muted mt-0.5">Administrator</div>
+                      <div className="text-xs text-text-muted mt-0.5 capitalize">{user?.role ?? 'user'}</div>
                     </div>
+                    <button
+                      onClick={() => { setUserMenuOpen(false); navigate('/account'); }}
+                      className="flex items-center gap-2.5 w-full px-4 py-2.5 text-sm text-text-secondary hover:bg-brand-slate hover:text-text-primary transition-colors"
+                    >
+                      <UserCircle className="w-3.5 h-3.5" /> Account &amp; Security
+                    </button>
                     <button
                       onClick={() => { setUserMenuOpen(false); navigate('/settings'); }}
                       className="flex items-center gap-2.5 w-full px-4 py-2.5 text-sm text-text-secondary hover:bg-brand-slate hover:text-text-primary transition-colors"

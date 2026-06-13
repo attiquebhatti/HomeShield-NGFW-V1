@@ -9,6 +9,7 @@ import QRCode from 'qrcode';
 import { parseFeed } from './feeds.mjs';
 import { generateKeyPair, derivePublicKey, generatePresharedKey, nextPeerAddress, buildClientConfig } from './wireguard.mjs';
 import { buildEnvelope, readEnvelope, sha256 } from './backup.mjs';
+import { generateSecret, verifyTOTP, otpauthURL } from './totp.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -197,9 +198,10 @@ app.post('/api/auth/signup', authRateLimit, async (req, res) => {
     if (existing.length > 0)
       return res.status(403).json({ error: 'Signup is disabled — an admin account already exists. Please sign in.' });
 
+    // The first account (first-run setup) is always an admin.
     const passwordHash = await hash(password, 12);
     await query(
-      'INSERT INTO admin_users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)',
+      "INSERT INTO admin_users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, 'admin', ?)",
       [randomUUID(), email, passwordHash, now()]
     );
     res.json({ message: 'Account created. Please sign in.' });
@@ -210,15 +212,23 @@ app.post('/api/auth/signup', authRateLimit, async (req, res) => {
 
 app.post('/api/auth/login', authRateLimit, async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { email, password, code } = req.body || {};
     if (!email || !password)
       return res.status(400).json({ error: 'Email and password required' });
 
-    const rows = await query('SELECT id, email, password_hash FROM admin_users WHERE email = ? LIMIT 1', [email]);
+    const rows = await query(
+      'SELECT id, email, password_hash, role, mfa_secret, mfa_enabled FROM admin_users WHERE email = ? LIMIT 1', [email]
+    );
     if (!rows.length || !(await compare(password, rows[0].password_hash)))
       return res.status(401).json({ error: 'Invalid email or password' });
 
-    const user = { id: rows[0].id, email: rows[0].email };
+    if (rows[0].mfa_enabled) {
+      if (!code) return res.status(401).json({ error: 'MFA code required', mfa_required: true });
+      if (!verifyTOTP(rows[0].mfa_secret, code))
+        return res.status(401).json({ error: 'Invalid MFA code', mfa_required: true });
+    }
+
+    const user = { id: rows[0].id, email: rows[0].email, role: rows[0].role || 'admin' };
     res.json({ token: jwtSign(user), user });
   } catch (e) {
     serverError(res, 'login', e);
@@ -230,8 +240,161 @@ app.post('/api/auth/login', authRateLimit, async (req, res) => {
 const api = express.Router();
 api.use(authMiddleware);
 
-api.get('/auth/me', (req, res) => {
-  res.json({ user: { id: req.user.id, email: req.user.email } });
+// Role-based access control. Enforced server-side (the real boundary):
+//   - viewer:   read-only (GET), plus their own account/MFA endpoints
+//   - operator: full config, but no user management
+//   - admin:    everything
+function roleGuard(req, res, next) {
+  const role = req.user.role || 'admin';
+  if (req.path.startsWith('/users') && role !== 'admin') {
+    return res.status(403).json({ error: 'Admin role required' });
+  }
+  if (role === 'viewer' && req.method !== 'GET' && !req.path.startsWith('/auth/')) {
+    return res.status(403).json({ error: 'Read-only role' });
+  }
+  next();
+}
+api.use(roleGuard);
+
+api.get('/auth/me', async (req, res) => {
+  try {
+    const rows = await query('SELECT id, email, role, mfa_enabled FROM admin_users WHERE id = ? LIMIT 1', [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    res.json({ user: { id: rows[0].id, email: rows[0].email, role: rows[0].role || 'admin', mfa_enabled: !!rows[0].mfa_enabled } });
+  } catch (e) {
+    serverError(res, 'auth me', e);
+  }
+});
+
+// ─── MFA (self-service for the current user) ────────────────────────────────
+
+// Begin enrollment: generate a secret (stored but not yet enabled) and return
+// the otpauth URL + QR for the authenticator app.
+api.post('/auth/mfa/setup', async (req, res) => {
+  try {
+    const secret = generateSecret();
+    await query('UPDATE admin_users SET mfa_secret = ?, mfa_enabled = 0 WHERE id = ?', [secret, req.user.id]);
+    const url = otpauthURL({ secret, label: req.user.email, issuer: 'HomeShield' });
+    const qr = await QRCode.toDataURL(url, { margin: 1, width: 240 });
+    res.json({ data: { secret, otpauth: url, qr } });
+  } catch (e) {
+    serverError(res, 'mfa setup', e);
+  }
+});
+
+// Confirm enrollment by verifying a code against the pending secret.
+api.post('/auth/mfa/enable', async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    const rows = await query('SELECT mfa_secret FROM admin_users WHERE id = ? LIMIT 1', [req.user.id]);
+    if (!rows[0]?.mfa_secret) return res.status(400).json({ error: 'Run MFA setup first' });
+    if (!verifyTOTP(rows[0].mfa_secret, code)) return res.status(400).json({ error: 'Invalid code' });
+    await query('UPDATE admin_users SET mfa_enabled = 1 WHERE id = ?', [req.user.id]);
+    res.json({ data: { mfa_enabled: true } });
+  } catch (e) {
+    serverError(res, 'mfa enable', e);
+  }
+});
+
+// Disable MFA (requires a valid current code to prove possession).
+api.post('/auth/mfa/disable', async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    const rows = await query('SELECT mfa_secret, mfa_enabled FROM admin_users WHERE id = ? LIMIT 1', [req.user.id]);
+    if (!rows[0]?.mfa_enabled) return res.json({ data: { mfa_enabled: false } });
+    if (!verifyTOTP(rows[0].mfa_secret, code)) return res.status(400).json({ error: 'Invalid code' });
+    await query("UPDATE admin_users SET mfa_enabled = 0, mfa_secret = '' WHERE id = ?", [req.user.id]);
+    res.json({ data: { mfa_enabled: false } });
+  } catch (e) {
+    serverError(res, 'mfa disable', e);
+  }
+});
+
+// ─── User management (admin only — gated by roleGuard) ──────────────────────
+
+const ROLES = ['admin', 'operator', 'viewer'];
+
+api.get('/users', async (_req, res) => {
+  try {
+    const rows = await query('SELECT id, email, role, mfa_enabled, created_at FROM admin_users ORDER BY created_at ASC');
+    res.json({ data: castRows(rows), count: rows.length });
+  } catch (e) {
+    serverError(res, 'users list', e);
+  }
+});
+
+api.post('/users', async (req, res) => {
+  try {
+    const { email, password, role } = req.body || {};
+    if (!email || !password || password.length < 12)
+      return res.status(400).json({ error: 'Email and a 12+ character password are required' });
+    if (!ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+    const existing = await query('SELECT id FROM admin_users WHERE email = ? LIMIT 1', [email]);
+    if (existing.length) return res.status(409).json({ error: 'A user with that email already exists' });
+
+    const id = randomUUID();
+    await query(
+      'INSERT INTO admin_users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
+      [id, email, await hash(password, 12), role, now()]
+    );
+    await query(
+      'INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [randomUUID(), now(), req.user.email, 'user_create', 'user', id, JSON.stringify({ email, role }), req.ip || '']
+    );
+    res.status(201).json({ data: { id, email, role } });
+  } catch (e) {
+    serverError(res, 'users create', e);
+  }
+});
+
+api.patch('/users/:id', async (req, res) => {
+  try {
+    const { role, password } = req.body || {};
+    const target = await query('SELECT id, role FROM admin_users WHERE id = ? LIMIT 1', [req.params.id]);
+    if (!target.length) return res.status(404).json({ error: 'User not found' });
+
+    // Guard against removing the last admin.
+    if (role && role !== 'admin' && target[0].role === 'admin') {
+      const admins = await query("SELECT COUNT(*) AS c FROM admin_users WHERE role = 'admin'");
+      if (admins[0].c <= 1) return res.status(409).json({ error: 'Cannot demote the last admin' });
+    }
+
+    const sets = [];
+    const params = [];
+    if (role) {
+      if (!ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+      sets.push('role = ?'); params.push(role);
+    }
+    if (password) {
+      if (password.length < 12) return res.status(400).json({ error: 'Password must be 12+ characters' });
+      sets.push('password_hash = ?'); params.push(await hash(password, 12));
+    }
+    if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
+    await query(`UPDATE admin_users SET ${sets.join(', ')} WHERE id = ?`, [...params, req.params.id]);
+    res.json({ data: { id: req.params.id } });
+  } catch (e) {
+    serverError(res, 'users update', e);
+  }
+});
+
+api.delete('/users/:id', async (req, res) => {
+  try {
+    if (req.params.id === req.user.id) return res.status(409).json({ error: 'You cannot delete your own account' });
+    const target = await query('SELECT role FROM admin_users WHERE id = ? LIMIT 1', [req.params.id]);
+    if (!target.length) return res.status(404).json({ error: 'User not found' });
+    if (target[0].role === 'admin') {
+      const admins = await query("SELECT COUNT(*) AS c FROM admin_users WHERE role = 'admin'");
+      if (admins[0].c <= 1) return res.status(409).json({ error: 'Cannot delete the last admin' });
+    }
+    await query('DELETE FROM admin_users WHERE id = ?', [req.params.id]);
+    await query(
+      'INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [randomUUID(), now(), req.user.email, 'user_delete', 'user', req.params.id, '{}', req.ip || '']
+    );
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'users delete', e);
+  }
 });
 
 // ─── CRUD config ──────────────────────────────────────────────────────────
@@ -1277,6 +1440,28 @@ async function ensureVpnTables() {
   }
 }
 
+// Adds RBAC/MFA columns to admin_users on existing databases. Idempotent.
+async function ensureUserColumns() {
+  try {
+    const [cols] = await getPool().query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
+      [process.env.DB_NAME, 'admin_users']
+    );
+    const have = new Set(cols.map(c => c.column_name || c.COLUMN_NAME));
+    if (!have.has('role')) {
+      await getPool().query("ALTER TABLE admin_users ADD COLUMN role ENUM('admin','operator','viewer') NOT NULL DEFAULT 'admin'");
+    }
+    if (!have.has('mfa_secret')) {
+      await getPool().query("ALTER TABLE admin_users ADD COLUMN mfa_secret VARCHAR(64) DEFAULT ''");
+    }
+    if (!have.has('mfa_enabled')) {
+      await getPool().query('ALTER TABLE admin_users ADD COLUMN mfa_enabled TINYINT(1) DEFAULT 0');
+    }
+  } catch (e) {
+    console.error('ensureUserColumns failed:', e.message);
+  }
+}
+
 // Returns the single VPN server row, creating it (with a fresh keypair) on
 // first access.
 async function getOrCreateVpnServer() {
@@ -1449,6 +1634,7 @@ async function refreshDueFeeds() {
 
 autoMigrate().then(() => {
   ensureVpnTables();
+  ensureUserColumns();
   ensureDefaultSettings();
   pruneOldLogs();
   setInterval(pruneOldLogs, 24 * 60 * 60 * 1000);

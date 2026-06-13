@@ -19,6 +19,8 @@ import { Interfaces } from './pages/Interfaces';
 import { AuditLog } from './pages/AuditLog';
 import { Backup } from './pages/Backup';
 import { Settings } from './pages/Settings';
+import { Account } from './pages/Account';
+import { Users } from './pages/Users';
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
   constructor(props: { children: ReactNode }) {
@@ -146,6 +148,8 @@ function AppRoutes() {
         <Route path="interfaces" element={<Interfaces />} />
         <Route path="audit" element={<AuditLog />} />
         <Route path="backup" element={<Backup />} />
+        <Route path="account" element={<Account />} />
+        <Route path="users" element={<Users />} />
         <Route path="settings" element={<Settings />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

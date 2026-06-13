@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS admin_users (
   id VARCHAR(36) PRIMARY KEY,
   email VARCHAR(255) UNIQUE NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
+  role ENUM('admin','operator','viewer') NOT NULL DEFAULT 'admin',
+  mfa_secret VARCHAR(64) DEFAULT '',
+  mfa_enabled TINYINT(1) DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

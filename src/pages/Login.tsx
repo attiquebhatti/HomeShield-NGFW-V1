@@ -13,6 +13,8 @@ export function Login() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [setupDone, setSetupDone] = useState(false);
+  const [mfaStep, setMfaStep] = useState(false);
+  const [code, setCode] = useState('');
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -22,9 +24,14 @@ export function Login() {
       return;
     }
     setLoading(true);
-    const { error: err } = await signIn(email, password);
-    if (err) setError(err);
+    const { error: err, mfaRequired } = await signIn(email, password, mfaStep ? code : undefined);
     setLoading(false);
+    if (mfaRequired) {
+      setMfaStep(true);
+      if (mfaStep && err) setError(err); // wrong code on the MFA step
+      return;
+    }
+    if (err) setError(err);
   }
 
   async function handleSetup(e: FormEvent) {
@@ -59,7 +66,7 @@ export function Login() {
             <Shield className="w-8 h-8 text-success" />
           </div>
           <h2 className="text-xl font-bold text-text-primary">Admin account created</h2>
-          <p className="text-sm text-text-muted">Check your email to confirm your account, then sign in.</p>
+          <p className="text-sm text-text-muted">Your admin account is ready. Sign in to continue.</p>
           <button onClick={() => { setMode('login'); setSetupDone(false); }} className="text-brand-gold hover:text-brand-gold-bright text-sm underline">
             Back to sign in
           </button>
@@ -123,6 +130,21 @@ export function Login() {
               </div>
             </div>
 
+            {mode === 'login' && mfaStep && (
+              <div>
+                <label className="block text-xs font-medium text-text-muted mb-1.5">Authenticator Code</label>
+                <input
+                  className={inputCls}
+                  placeholder="6-digit code"
+                  value={code}
+                  onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  inputMode="numeric"
+                  autoFocus
+                />
+                <p className="text-xs text-text-muted/60 mt-1">Enter the code from your authenticator app.</p>
+              </div>
+            )}
+
             {mode === 'setup' && (
               <div>
                 <label className="block text-xs font-medium text-text-muted mb-1.5">Confirm Password</label>
@@ -168,7 +190,7 @@ export function Login() {
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
               ) : <Lock className="w-4 h-4" />}
-              {mode === 'login' ? 'Sign In' : 'Create Admin Account'}
+              {mode === 'setup' ? 'Create Admin Account' : mfaStep ? 'Verify & Sign In' : 'Sign In'}
             </button>
           </form>
         </div>

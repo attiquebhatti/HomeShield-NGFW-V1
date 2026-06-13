@@ -58,14 +58,31 @@ async function apiFetch<T = unknown>(
 
 // ─── Auth ──────────────────────────────────────────────────────────────────
 
+export interface AuthUserInfo {
+  id: string;
+  email: string;
+  role: 'admin' | 'operator' | 'viewer';
+  mfa_enabled?: boolean;
+}
+
 export const auth = {
-  async signIn(email: string, password: string) {
-    const res = await apiFetch<{ token: string; user: { id: string; email: string } }>(
-      'auth/login',
-      { method: 'POST', body: JSON.stringify({ email, password }) }
-    );
-    if (res.data?.token) setToken(res.data.token);
-    return res;
+  // Returns { error, mfaRequired } — mfaRequired signals the caller to prompt
+  // for a TOTP code and call signIn again with it.
+  async signIn(email: string, password: string, code?: string): Promise<{ error: string | null; mfaRequired: boolean }> {
+    const token = getToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    try {
+      const res = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST', headers, body: JSON.stringify({ email, password, code }),
+      });
+      const json = await res.json();
+      if (!res.ok) return { error: json.error || `HTTP ${res.status}`, mfaRequired: !!json.mfa_required };
+      if (json.token) setToken(json.token);
+      return { error: null, mfaRequired: false };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : 'Network error', mfaRequired: false };
+    }
   },
 
   async signUp(email: string, password: string) {
@@ -75,9 +92,9 @@ export const auth = {
     });
   },
 
-  async getUser(): Promise<{ id: string; email: string } | null> {
+  async getUser(): Promise<AuthUserInfo | null> {
     if (!getToken()) return null;
-    const res = await apiFetch<{ user: { id: string; email: string } }>('auth/me');
+    const res = await apiFetch<{ user: AuthUserInfo }>('auth/me');
     return res.data?.user ?? null;
   },
 

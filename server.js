@@ -5,6 +5,7 @@ import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
+import { parseFeed } from './feeds.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -473,6 +474,42 @@ api.post('/ids-alerts/acknowledge-many', async (req, res) => {
   }
 });
 
+// Refresh all enabled feeds now.
+api.post('/threat-feeds/refresh-all', async (_req, res) => {
+  try {
+    const feeds = await query('SELECT * FROM threat_feeds WHERE enabled = 1');
+    const results = [];
+    for (const feed of feeds) results.push(await refreshOneFeed(feed));
+    res.json({ refreshed: results.length, results });
+  } catch (e) {
+    serverError(res, 'refresh-all feeds', e);
+  }
+});
+
+// Refresh a single feed now.
+api.post('/threat-feeds/:id/refresh', async (req, res) => {
+  try {
+    const rows = await query('SELECT * FROM threat_feeds WHERE id = ? LIMIT 1', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    const result = await refreshOneFeed(rows[0]);
+    const updated = await query('SELECT * FROM threat_feeds WHERE id = ? LIMIT 1', [req.params.id]);
+    res.json({ data: castRow(updated[0]), result });
+  } catch (e) {
+    serverError(res, 'refresh feed', e);
+  }
+});
+
+// Deleting a feed also removes its indicators.
+api.delete('/threat-feeds/:id', async (req, res) => {
+  try {
+    await query('DELETE FROM threat_indicators WHERE feed_id = ?', [req.params.id]);
+    await query('DELETE FROM threat_feeds WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (e) {
+    serverError(res, 'delete feed', e);
+  }
+});
+
 for (const resource of CRUD_RESOURCES) {
   api.get(`/${resource}`, (req, res) => listRows(resource, req, res));
   api.get(`/${resource}/:id`, (req, res) => getRow(resource, req.params.id, res));
@@ -678,6 +715,25 @@ agent.get('/ips-config', async (_req, res) => {
   }
 });
 
+// Active threat-intel blocklist for the agent: IP/CIDR indicators from
+// enabled feeds that haven't expired. The agent compiles these into an
+// nftables set. Capped to keep the payload and ruleset bounded.
+agent.get('/threat-set', async (_req, res) => {
+  try {
+    const rows = await query(
+      `SELECT ti.value FROM threat_indicators ti
+       JOIN threat_feeds tf ON tf.id = ti.feed_id
+       WHERE tf.enabled = 1
+         AND ti.indicator_type IN ('ip', 'cidr')
+         AND (ti.expires_at IS NULL OR ti.expires_at > NOW())
+       LIMIT 200000`
+    );
+    res.json({ data: { values: rows.map(r => r.value) } });
+  } catch (e) {
+    serverError(res, 'agent threat-set', e);
+  }
+});
+
 // Bulk IDS/IPS alert ingestion from Suricata eve.json (max 500 per request).
 agent.post('/ids-alerts', async (req, res) => {
   try {
@@ -823,12 +879,102 @@ async function pruneOldLogs() {
   }
 }
 
+// ─── Threat feed refresh ────────────────────────────────────────────────────
+// Downloads a feed, parses indicators, and atomically replaces the feed's
+// stored indicators. Updates the feed's status/count/timestamp.
+
+const FEED_MAX_BYTES = 16 * 1024 * 1024;
+
+async function fetchFeedBody(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'HomeShield-NGFW/1.0' },
+      redirect: 'follow',
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const text = await resp.text();
+    if (text.length > FEED_MAX_BYTES) throw new Error('feed exceeds size limit');
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function refreshOneFeed(feed) {
+  if (!feed.url) {
+    await query("UPDATE threat_feeds SET last_status = 'error: no url', last_updated = ? WHERE id = ?", [now(), feed.id]);
+    return { id: feed.id, status: 'error: no url', count: 0 };
+  }
+  try {
+    const body = await fetchFeedBody(feed.url);
+    const indicators = parseFeed(body, feed.feed_type);
+
+    // Replace this feed's indicators atomically.
+    const conn = await getPool().getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.execute('DELETE FROM threat_indicators WHERE feed_id = ?', [feed.id]);
+      const ts = now();
+      for (let i = 0; i < indicators.length; i += 1000) {
+        const chunk = indicators.slice(i, i + 1000);
+        const placeholders = chunk.map(() => '(?, ?, ?, ?, ?)').join(', ');
+        const values = [];
+        for (const ind of chunk) {
+          values.push(randomUUID(), feed.id, ind.indicator_type, ind.value, ts);
+        }
+        await conn.execute(
+          `INSERT INTO threat_indicators (id, feed_id, indicator_type, value, created_at) VALUES ${placeholders}`,
+          values
+        );
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    await query(
+      "UPDATE threat_feeds SET last_status = 'ok', last_updated = ?, indicator_count = ? WHERE id = ?",
+      [now(), indicators.length, feed.id]
+    );
+    console.log(`Feed "${feed.name}": ${indicators.length} indicators`);
+    return { id: feed.id, status: 'ok', count: indicators.length };
+  } catch (e) {
+    const status = `error: ${e.message}`.slice(0, 90);
+    await query('UPDATE threat_feeds SET last_status = ?, last_updated = ? WHERE id = ?', [status, now(), feed.id]);
+    console.error(`Feed "${feed.name}" refresh failed:`, e.message);
+    return { id: feed.id, status, count: 0 };
+  }
+}
+
+// Refreshes enabled feeds that are due based on refresh_interval_hours.
+async function refreshDueFeeds() {
+  try {
+    const feeds = await query('SELECT * FROM threat_feeds WHERE enabled = 1');
+    for (const feed of feeds) {
+      const interval = Math.max(0, parseInt(feed.refresh_interval_hours, 10) || 0);
+      const last = feed.last_updated ? new Date(feed.last_updated).getTime() : 0;
+      const due = !last || Date.now() - last >= interval * 3600 * 1000;
+      if (due) await refreshOneFeed(feed);
+    }
+  } catch (e) {
+    console.error('refreshDueFeeds failed:', e.message);
+  }
+}
+
 // ─── Start ─────────────────────────────────────────────────────────────────
 
 autoMigrate().then(() => {
   ensureDefaultSettings();
   pruneOldLogs();
   setInterval(pruneOldLogs, 24 * 60 * 60 * 1000);
+  refreshDueFeeds();
+  setInterval(refreshDueFeeds, 60 * 60 * 1000);
   app.listen(PORT, () => {
     console.log(`HomeShield running on port ${PORT}`);
     console.log(`DB: ${process.env.DB_HOST}/${process.env.DB_NAME}`);

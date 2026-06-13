@@ -299,5 +299,12 @@ export const api = {
     const resource = TABLE_MAP[tableName] ?? tableName.replace(/_/g, '-');
     return new Table<T>(resource);
   },
+  // Calls a custom action endpoint, e.g. post('threat-feeds/<id>/refresh').
+  async post<T = unknown>(path: string, body?: unknown) {
+    return apiFetch<T>(path, {
+      method: 'POST',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  },
   auth,
 };

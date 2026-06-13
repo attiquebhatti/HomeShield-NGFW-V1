@@ -115,6 +115,25 @@ traffic. Add Suricata `pass` rules for your management/SSH flows before
 enabling drops, and remember the firewall policy ruleset and the IPS queue are
 independent layers — both must permit your management traffic.
 
+## Threat intelligence blocking
+
+Add IP/domain blocklist feeds on the Threat Feeds page (URL + type +
+refresh interval). The **server** downloads enabled feeds on their schedule
+(or on demand via the Refresh button), parses them, and stores indicators.
+The **agent** pulls active IP/CIDR indicators every config cycle and compiles
+them into an nftables set (`table inet homeshield_threats`):
+
+- Runs at **priority -10**, before the policy filter, so traffic to or from a
+  known-bad address is dropped early regardless of policy.
+- Uses interval sets, so individual IPs and CIDR ranges coexist; hit counts
+  are visible via `sudo nft list table inet homeshield_threats`.
+- Self-healing: re-asserted each cycle, so it survives a policy rollback.
+
+Only `ip`/`cidr` indicators feed the nftables set. Domain and hash indicators
+are stored and counted but not yet enforced (domain feeds → DNS sinkhole is a
+planned follow-up). Good starter feeds: abuse.ch Feodo Tracker, Emerging
+Threats compromised IPs, Spamhaus DROP.
+
 ## Requirements
 
 - Linux with nftables (`nft`) and iproute2 (`ip`)

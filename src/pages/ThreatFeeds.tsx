@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, Rss, ToggleRight, ToggleLeft, Clock } from 'lucide-react';
+import { Plus, Trash2, Rss, ToggleRight, ToggleLeft, Clock, RefreshCw } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
@@ -36,6 +36,7 @@ export function ThreatFeeds() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState<typeof empty>(empty);
+  const [refreshing, setRefreshing] = useState<string | null>(null);
 
   async function fetchFeeds() {
     const { data } = await api.from<ThreatFeed>('threat_feeds').select('*').order('created_at', { ascending: false });
@@ -66,6 +67,20 @@ export function ThreatFeeds() {
     fetchFeeds();
   }
 
+  async function refresh(feed: ThreatFeed) {
+    setRefreshing(feed.id);
+    await api.post(`threat-feeds/${feed.id}/refresh`);
+    setRefreshing(null);
+    fetchFeeds();
+  }
+
+  async function refreshAll() {
+    setRefreshing('all');
+    await api.post('threat-feeds/refresh-all');
+    setRefreshing(null);
+    fetchFeeds();
+  }
+
   const totalIndicators = feeds.reduce((sum, f) => sum + f.indicator_count, 0);
   const cls = 'w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-brand-gold/50 focus:ring-1 focus:ring-brand-gold/20 transition-all';
   const lbl = 'block text-xs font-medium text-text-muted mb-1';
@@ -79,7 +94,12 @@ export function ThreatFeeds() {
             {feeds.filter(f => f.enabled).length} active feeds · {totalIndicators.toLocaleString()} total indicators
           </p>
         </div>
-        <Button variant="primary" onClick={() => setModalOpen(true)}><Plus className="w-4 h-4" /> Add Feed</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" onClick={refreshAll} loading={refreshing === 'all'} disabled={!!refreshing}>
+            <RefreshCw className="w-4 h-4" /> Refresh All
+          </Button>
+          <Button variant="primary" onClick={() => setModalOpen(true)}><Plus className="w-4 h-4" /> Add Feed</Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4">
@@ -106,6 +126,14 @@ export function ThreatFeeds() {
                     {feed.url && <p className="text-xs text-text-muted/60 font-mono mt-1 truncate max-w-sm">{feed.url}</p>}
                   </div>
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => refresh(feed)}
+                      disabled={!!refreshing || !feed.url}
+                      title={feed.url ? 'Refresh now' : 'No URL configured'}
+                      className="p-1.5 rounded text-text-muted hover:text-info hover:bg-info/10 transition-colors disabled:opacity-40"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${refreshing === feed.id ? 'animate-spin' : ''}`} />
+                    </button>
                     <button onClick={() => toggle(feed)} className="flex items-center gap-1.5 text-xs">
                       {feed.enabled
                         ? <><ToggleRight className="w-5 h-5 text-success" /><span className="text-success">On</span></>

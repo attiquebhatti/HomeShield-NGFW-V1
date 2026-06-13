@@ -29,6 +29,7 @@ import dgram from 'node:dgram';
 import { parseKernelLogLine, parseConntrack, splitJournalOutput } from './parsers.mjs';
 import { parseQuery, buildBlockResponse, createMatcher, sinkholeAddress } from './dns.mjs';
 import { parseEveAlert, buildIpsTable } from './ips.mjs';
+import { buildThreatTable, splitByFamily } from './threats.mjs';
 
 const exec = promisify(execFile);
 
@@ -491,6 +492,42 @@ async function collectIdsAlerts() {
   }
 }
 
+// ─── Threat intelligence blocking ──────────────────────────────────────────
+// Pulls active IP/CIDR indicators and compiles them into an nftables set that
+// drops bad traffic before policy evaluation (priority -10). Re-asserted each
+// cycle so it self-heals after a ruleset rollback flushes the global ruleset.
+
+let threatTableActive = false;
+
+async function removeThreatTable() {
+  try {
+    await exec('nft', ['delete', 'table', 'inet', 'homeshield_threats']);
+  } catch {
+    // not present
+  }
+}
+
+async function refreshThreatSet() {
+  const { values } = await api('/threat-set');
+  const { v4, v6 } = splitByFamily(values || []);
+  const script = buildThreatTable(v4, v6);
+
+  if (!script) {
+    if (threatTableActive) {
+      await removeThreatTable();
+      threatTableActive = false;
+      log('Threat blocklist cleared');
+    }
+    return;
+  }
+
+  const file = join(STATE_DIR, 'threats.nft');
+  await writeFile(file, script, 'utf8');
+  await exec('nft', ['-f', file]);
+  if (!threatTableActive) log(`Threat blocklist active: ${v4.length} IPv4, ${v6.length} IPv6`);
+  threatTableActive = true;
+}
+
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
 async function main() {
@@ -532,6 +569,11 @@ async function main() {
         await refreshIpsConfig();
       } catch (e) {
         log('IPS config refresh error:', e.message);
+      }
+      try {
+        await refreshThreatSet();
+      } catch (e) {
+        log('Threat set refresh error:', e.message);
       }
       lastConfigRefresh = Date.now();
     }

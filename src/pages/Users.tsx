@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react';
 import { UserPlus, Trash2, ShieldCheck, KeyRound } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { Card, CardHeader, CardBody } from '../components/ui/Card';
-import { Badge } from '../components/ui/Badge';
+import { Card, CardHeader } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
 
@@ -16,7 +15,6 @@ interface AdminUser {
 }
 
 const ROLES: AdminUser['role'][] = ['admin', 'operator', 'viewer'];
-const roleVariant: Record<string, 'danger' | 'warning' | 'info'> = { admin: 'danger', operator: 'warning', viewer: 'info' };
 const roleHelp: Record<string, string> = {
   admin: 'Full access including user management',
   operator: 'Manage all firewall config, but not users',

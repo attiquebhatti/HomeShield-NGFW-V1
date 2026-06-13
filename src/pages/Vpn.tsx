@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { Plus, Trash2, Download, QrCode, ToggleRight, ToggleLeft, Save, Server, Users } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card, CardHeader, CardBody } from '../components/ui/Card';
-import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
 import { StatusDot } from '../components/ui/StatusDot';

@@ -4,7 +4,7 @@ import {
   Database, Lock, RefreshCw, FileJson, RotateCcw, Plus
 } from 'lucide-react';
 import { api } from '../lib/api';
-import { Card, CardHeader, CardBody } from '../components/ui/Card';
+import { Card, CardHeader } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';

@@ -1,0 +1,68 @@
+{
+  "title": "HomeShield NGFW",
+  "uid": "homeshield-ngfw",
+  "tags": ["homeshield"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat", "title": "Unacknowledged IDS/IPS Alerts",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } } },
+      "targets": [{ "expr": "homeshield_ids_alerts_unacknowledged", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "Tracked Sessions",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "expr": "homeshield_sessions", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "Threat Indicators",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "sum(homeshield_threat_indicators)", "refId": "A" }]
+    },
+    {
+      "type": "stat", "title": "Active VPN Peers",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "homeshield_vpn_peers{status=\"enabled\"}", "refId": "A" }]
+    },
+    {
+      "type": "timeseries", "title": "CPU / RAM / Disk %",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 } },
+      "targets": [
+        { "expr": "homeshield_cpu_percent", "legendFormat": "CPU", "refId": "A" },
+        { "expr": "homeshield_ram_percent", "legendFormat": "RAM", "refId": "B" },
+        { "expr": "homeshield_disk_percent", "legendFormat": "Disk", "refId": "C" }
+      ]
+    },
+    {
+      "type": "piechart", "title": "DNS Queries (24h)",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 4 },
+      "targets": [{ "expr": "homeshield_dns_queries_24h", "legendFormat": "{{action}}", "refId": "A" }]
+    },
+    {
+      "type": "piechart", "title": "App Flows by Category (24h)",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 4 },
+      "targets": [{ "expr": "homeshield_app_flows_24h", "legendFormat": "{{category}}", "refId": "A" }]
+    },
+    {
+      "type": "timeseries", "title": "Firewall Events (24h) by Action",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [{ "expr": "homeshield_firewall_events_24h", "legendFormat": "{{action}}", "refId": "A" }]
+    },
+    {
+      "type": "timeseries", "title": "Interface Throughput (bytes)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "targets": [
+        { "expr": "rate(homeshield_interface_rx_bytes[5m])", "legendFormat": "{{interface}} rx", "refId": "A" },
+        { "expr": "rate(homeshield_interface_tx_bytes[5m])", "legendFormat": "{{interface}} tx", "refId": "B" }
+      ]
+    }
+  ]
+}

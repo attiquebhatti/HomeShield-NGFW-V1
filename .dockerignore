@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.gitignore
+*.md
+agent
+packaging
+deploy
+supabase
+api/index.php
+.env
+.env.*
+npm-debug.log
+.bolt

@@ -48,8 +48,17 @@ atomically with `nft -f`, and if the operator doesn't confirm within the
 rollback timer the agent restores the previous ruleset — so a bad rule can't
 permanently lock you out.
 
+## Deployment
+
+Run the management server with Docker Compose (`cp .env.example .env`, then
+`docker compose up -d --build`), and install the agent on the firewall machine
+from a `.deb`. Optional Prometheus + Grafana monitoring via
+`docker compose --profile monitoring up -d`. Full instructions:
+[docs/deployment.md](docs/deployment.md).
+
 ## Docs
 
+- [docs/deployment.md](docs/deployment.md) — Docker, agent .deb, monitoring
 - [docs/architecture.md](docs/architecture.md)
 - [docs/firewall-policy-model.md](docs/firewall-policy-model.md)
 - [docs/threat-model.md](docs/threat-model.md)

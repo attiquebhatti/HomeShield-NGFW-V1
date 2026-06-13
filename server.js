@@ -875,9 +875,11 @@ api.get('/agent-download/windows', (req, res) => {
   }
 });
 
-// Whether the agent API is enabled (so the UI can warn if AGENT_TOKEN is unset).
-api.get('/agent-status', (_req, res) => {
-  res.json({ data: { agent_api_enabled: !!AGENT_TOKEN } });
+// Agent API status. The shared token is revealed to admins only so they can
+// copy the install command; other roles get just the enabled flag.
+api.get('/agent-status', (req, res) => {
+  const isAdmin = (req.user.role || 'admin') === 'admin';
+  res.json({ data: { agent_api_enabled: !!AGENT_TOKEN, token: isAdmin ? (AGENT_TOKEN || '') : undefined } });
 });
 
 // ─── Devices (inventory) ───────────────────────────────────────────────────

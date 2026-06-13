@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, Trash2, Monitor, Server, Smartphone, HelpCircle, Download, Plus, AlertTriangle } from 'lucide-react';
+import { RefreshCw, Trash2, Monitor, Server, Smartphone, HelpCircle, Download, Plus, AlertTriangle, Copy, Check } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card, CardHeader } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
@@ -36,6 +36,8 @@ export function Devices() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
   const [agentEnabled, setAgentEnabled] = useState(true);
+  const [agentToken, setAgentToken] = useState('');
+  const [copied, setCopied] = useState(false);
 
   async function fetchDevices() {
     const { data } = await api.get<Device[]>('devices');
@@ -45,12 +47,22 @@ export function Devices() {
 
   useEffect(() => {
     fetchDevices();
-    api.get<{ agent_api_enabled: boolean }>('agent-status').then(r => setAgentEnabled(r.data?.agent_api_enabled ?? true));
+    api.get<{ agent_api_enabled: boolean; token?: string }>('agent-status').then(r => {
+      setAgentEnabled(r.data?.agent_api_enabled ?? true);
+      setAgentToken(r.data?.token ?? '');
+    });
     const t = setInterval(fetchDevices, 15000);
     return () => clearInterval(t);
   }, []);
 
-  const installCmd = `.\\homeshield-install.ps1 -Token "<AGENT_TOKEN>"`;
+  const installCmd = `powershell -ExecutionPolicy Bypass -File .\\homeshield-install.ps1 -Token "${agentToken || '<AGENT_TOKEN>'}"`;
+
+  function copyCmd() {
+    navigator.clipboard?.writeText(installCmd).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
 
   async function removeDevice(id: string) {
     await api.del(`devices/${id}`);
@@ -150,12 +162,20 @@ export function Devices() {
             <Button variant="primary" onClick={() => api.download('agent-download/windows', 'homeshield-install.ps1')}>
               <Download className="w-4 h-4" /> Download Windows Installer (.ps1)
             </Button>
-            <div className="text-xs text-text-muted mt-1">Then run (the server URL is pre-filled):</div>
-            <code className="block px-3 py-2 bg-brand-main rounded-lg text-xs font-mono text-success break-all">{installCmd}</code>
-            <p className="text-xs text-text-muted/70">
-              <code className="font-mono">AGENT_TOKEN</code> is the shared secret set in the server's environment
-              (the same value enables the agent API).
-            </p>
+            <div className="text-xs text-text-muted mt-1">
+              Open PowerShell <strong>as Administrator</strong>, <code className="font-mono">cd</code> to the download
+              folder, then run (the server URL and token are pre-filled):
+            </div>
+            <div className="relative">
+              <code className="block px-3 py-2 pr-10 bg-brand-main rounded-lg text-xs font-mono text-success break-all">{installCmd}</code>
+              <button onClick={copyCmd} title="Copy"
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded text-text-muted hover:text-text-primary hover:bg-brand-slate transition-colors">
+                {copied ? <Check className="w-3.5 h-3.5 text-success" /> : <Copy className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            {agentToken
+              ? <p className="text-xs text-text-muted/70">The <code className="font-mono">-ExecutionPolicy Bypass</code> clears the unsigned-script block on the downloaded file.</p>
+              : <p className="text-xs text-warning">No <code className="font-mono">AGENT_TOKEN</code> is set on the server, so the command shows a placeholder. Set one in the server environment and restart first.</p>}
           </div>
 
           {/* Linux */}

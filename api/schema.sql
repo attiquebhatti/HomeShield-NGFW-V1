@@ -172,7 +172,9 @@ INSERT IGNORE INTO system_settings (`key`, value, description) VALUES
   ('rollback_timer_seconds', '30', 'Auto-rollback timer in seconds'),
   ('dns_filtering_enabled', 'false', 'Enable DNS filtering'),
   ('dns_upstream', '1.1.1.1', 'Upstream DNS resolver for the filtering proxy'),
-  ('ids_enabled', 'false', 'Enable IDS engine'),
+  ('ips_mode', 'off', 'Suricata mode: off, ids (detect), or ips (inline block)'),
+  ('suricata_queue_num', '0', 'NFQUEUE number Suricata reads in IPS mode'),
+  ('suricata_eve_path', '/var/log/suricata/eve.json', 'Path to Suricata eve.json'),
   ('log_retention_days', '90', 'Log retention in days'),
   ('dashboard_refresh_seconds', '15', 'Dashboard auto-refresh interval');
 

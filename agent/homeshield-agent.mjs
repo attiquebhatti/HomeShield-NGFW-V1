@@ -16,16 +16,19 @@
  *   STATE_DIR        Where backups/rulesets are kept (default /var/lib/homeshield)
  *   POLL_SECONDS     Job poll interval          (default 5)
  *   TELEMETRY_SECONDS Telemetry interval        (default 60)
+ *   DNS_PORT         DNS proxy listen port      (default 53)
+ *   DNS_REFRESH_SECONDS  DNS/IPS config refresh (default 30)
  */
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat as statFile, open as openFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
 import dgram from 'node:dgram';
 import { parseKernelLogLine, parseConntrack, splitJournalOutput } from './parsers.mjs';
 import { parseQuery, buildBlockResponse, createMatcher, sinkholeAddress } from './dns.mjs';
+import { parseEveAlert, buildIpsTable } from './ips.mjs';
 
 const exec = promisify(execFile);
 
@@ -385,15 +388,119 @@ async function flushDnsLogs() {
   }
 }
 
+// ─── Suricata IDS/IPS ──────────────────────────────────────────────────────
+// IPS mode: install an nftables NFQUEUE hook (homeshield_ips table) so
+// Suricata can drop packets inline. The hook is fail-open (bypass), so if
+// Suricata is down, traffic flows. Both modes tail eve.json into ids_alerts.
+
+let ipsMode = 'off';          // 'off' | 'ids' | 'ips'
+let ipsQueueNum = 0;
+let prevIpsMode = 'off';
+let evePath = '/var/log/suricata/eve.json';
+
+async function applyIpsHook() {
+  const file = join(STATE_DIR, 'ips-hook.nft');
+  await writeFile(file, buildIpsTable(ipsQueueNum, true), 'utf8');
+  await exec('nft', ['-f', file]);
+}
+
+async function removeIpsHook() {
+  try {
+    await exec('nft', ['delete', 'table', 'inet', 'homeshield_ips']);
+  } catch {
+    // table may not exist — nothing to remove
+  }
+}
+
+async function refreshIpsConfig() {
+  const config = await api('/ips-config');
+  ipsMode = config.mode || 'off';
+  ipsQueueNum = Number.isInteger(config.queue_num) ? config.queue_num : 0;
+  evePath = config.eve_path || '/var/log/suricata/eve.json';
+
+  if (ipsMode === 'ips') {
+    // Re-assert every cycle so the hook self-heals after a ruleset rollback
+    // (which flushes the global ruleset) restores it within one interval.
+    await applyIpsHook();
+  } else if (prevIpsMode === 'ips') {
+    await removeIpsHook();
+    log('IPS NFQUEUE hook removed');
+  }
+
+  if (ipsMode !== prevIpsMode) log(`Suricata mode: ${ipsMode}`);
+  prevIpsMode = ipsMode;
+}
+
+// Incremental eve.json tail with a persisted byte offset. Handles log
+// rotation/truncation by resetting to 0 when the file shrinks.
+const EVE_OFFSET_FILE = join(STATE_DIR, 'eve.offset');
+let eveOffset = 0;
+
+async function loadEveOffset() {
+  try {
+    eveOffset = parseInt(await readFile(EVE_OFFSET_FILE, 'utf8'), 10) || 0;
+  } catch {
+    eveOffset = 0;
+  }
+}
+
+async function readNewLines(path, fromOffset) {
+  const handle = await openFile(path, 'r');
+  try {
+    const { size } = await handle.stat();
+    let start = fromOffset;
+    if (size < fromOffset) start = 0; // rotated or truncated
+    if (size === start) return { lines: [], newOffset: size };
+
+    const length = size - start;
+    const buf = Buffer.alloc(length);
+    await handle.read(buf, 0, length, start);
+
+    // Only consume up to the last complete line; leave a partial line for next time.
+    const lastNl = buf.lastIndexOf(0x0a);
+    if (lastNl < 0) return { lines: [], newOffset: start };
+    const text = buf.toString('utf8', 0, lastNl);
+    return { lines: text.split('\n'), newOffset: start + lastNl + 1 };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function collectIdsAlerts() {
+  if (ipsMode === 'off') return;
+  try {
+    await statFile(evePath);
+  } catch {
+    return; // Suricata not writing eve.json (yet)
+  }
+
+  const { lines, newOffset } = await readNewLines(evePath, eveOffset);
+  const alerts = lines.map(parseEveAlert).filter(Boolean);
+
+  for (let i = 0; i < alerts.length; i += 500) {
+    await api('/ids-alerts', {
+      method: 'POST',
+      body: JSON.stringify({ alerts: alerts.slice(i, i + 500) }),
+    });
+  }
+  if (alerts.length) log(`Ingested ${alerts.length} IDS/IPS alerts`);
+
+  if (newOffset !== eveOffset) {
+    eveOffset = newOffset;
+    await writeFile(EVE_OFFSET_FILE, String(eveOffset), 'utf8');
+  }
+}
+
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
 async function main() {
   await mkdir(STATE_DIR, { recursive: true });
   await loadCursor();
+  await loadEveOffset();
   log(`HomeShield agent started — API ${API}, state dir ${STATE_DIR}`);
 
   let lastTelemetry = 0;
-  let lastDnsRefresh = 0;
+  let lastConfigRefresh = 0;
 
   for (;;) {
     try {
@@ -409,13 +516,24 @@ async function main() {
       log('Log ingestion error:', e.message);
     }
 
-    if (Date.now() - lastDnsRefresh > DNS_REFRESH_SECONDS * 1000) {
+    try {
+      await collectIdsAlerts();
+    } catch (e) {
+      log('IDS/IPS alert ingestion error:', e.message);
+    }
+
+    if (Date.now() - lastConfigRefresh > DNS_REFRESH_SECONDS * 1000) {
       try {
         await refreshDnsConfig();
-        lastDnsRefresh = Date.now();
       } catch (e) {
         log('DNS config refresh error:', e.message);
       }
+      try {
+        await refreshIpsConfig();
+      } catch (e) {
+        log('IPS config refresh error:', e.message);
+      }
+      lastConfigRefresh = Date.now();
     }
 
     try {

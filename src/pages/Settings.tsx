@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Save, Shield, Server, Clock, Globe, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Save, Shield, ShieldAlert, Server, Clock, Globe, AlertTriangle, RefreshCw } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card, CardHeader, CardBody } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
@@ -39,12 +39,21 @@ const groups: SettingsGroup[] = [
   {
     label: 'Security',
     icon: Shield,
-    keys: ['rollback_timer_seconds', 'dns_filtering_enabled', 'dns_upstream', 'ids_enabled'],
+    keys: ['rollback_timer_seconds', 'dns_filtering_enabled', 'dns_upstream'],
     fields: {
       rollback_timer_seconds: { label: 'Rollback Timer (seconds)', type: 'number', placeholder: '30' },
       dns_filtering_enabled: { label: 'DNS Filtering', type: 'boolean' },
       dns_upstream: { label: 'Upstream DNS Resolver', type: 'text', placeholder: '1.1.1.1' },
-      ids_enabled: { label: 'IDS Engine', type: 'boolean' },
+    },
+  },
+  {
+    label: 'Intrusion Prevention',
+    icon: ShieldAlert,
+    keys: ['ips_mode', 'suricata_queue_num', 'suricata_eve_path'],
+    fields: {
+      ips_mode: { label: 'Suricata Mode', type: 'select', options: ['off', 'ids', 'ips'] },
+      suricata_queue_num: { label: 'NFQUEUE Number (IPS)', type: 'number', placeholder: '0' },
+      suricata_eve_path: { label: 'Suricata eve.json Path', type: 'text', placeholder: '/var/log/suricata/eve.json' },
     },
   },
   {

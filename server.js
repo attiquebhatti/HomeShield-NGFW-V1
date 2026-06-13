@@ -657,6 +657,51 @@ agent.post('/dns-logs', async (req, res) => {
   }
 });
 
+// Suricata IDS/IPS config for the agent: mode (off/ids/ips), NFQUEUE number
+// and the eve.json path to tail.
+agent.get('/ips-config', async (_req, res) => {
+  try {
+    const rows = await query(
+      "SELECT `key`, value FROM system_settings WHERE `key` IN ('ips_mode', 'suricata_queue_num', 'suricata_eve_path')"
+    );
+    const map = Object.fromEntries(rows.map(r => [r.key, r.value]));
+    const mode = ['off', 'ids', 'ips'].includes(map.ips_mode) ? map.ips_mode : 'off';
+    res.json({
+      data: {
+        mode,
+        queue_num: parseInt(map.suricata_queue_num, 10) || 0,
+        eve_path: map.suricata_eve_path || '/var/log/suricata/eve.json',
+      },
+    });
+  } catch (e) {
+    serverError(res, 'agent ips-config', e);
+  }
+});
+
+// Bulk IDS/IPS alert ingestion from Suricata eve.json (max 500 per request).
+agent.post('/ids-alerts', async (req, res) => {
+  try {
+    const alerts = Array.isArray(req.body?.alerts) ? req.body.alerts.slice(0, 500) : [];
+    if (!alerts.length) return res.json({ inserted: 0 });
+
+    const allowed = INSERTABLE_COLS['ids-alerts'];
+    let inserted = 0;
+    for (const entry of alerts) {
+      const data = prepareFields(entry, [], allowed);
+      if (!data.signature_name) continue;
+      data.id = randomUUID();
+      if (!data.timestamp) data.timestamp = now();
+      const cols = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+      const placeholders = Object.keys(data).map(() => '?').join(', ');
+      await query(`INSERT INTO ids_alerts (${cols}) VALUES (${placeholders})`, Object.values(data));
+      inserted++;
+    }
+    res.json({ inserted });
+  } catch (e) {
+    serverError(res, 'agent ids-alerts', e);
+  }
+});
+
 // Agent telemetry: replaces the interface inventory and live session list,
 // and records a health snapshot.
 agent.post('/telemetry', async (req, res) => {
@@ -725,12 +770,25 @@ if (existsSync(distDir)) {
 async function ensureDefaultSettings() {
   const defaults = [
     ['dns_upstream', '1.1.1.1', 'Upstream DNS resolver for the filtering proxy'],
+    ['suricata_queue_num', '0', 'NFQUEUE number Suricata reads in IPS mode'],
+    ['suricata_eve_path', '/var/log/suricata/eve.json', 'Path to Suricata eve.json'],
   ];
   try {
     for (const [key, value, description] of defaults) {
       await query(
         'INSERT IGNORE INTO system_settings (`key`, value, description, updated_at) VALUES (?, ?, ?, ?)',
         [key, value, description, now()]
+      );
+    }
+
+    // Migrate the legacy ids_enabled boolean to the ips_mode tri-state.
+    const existing = await query("SELECT value FROM system_settings WHERE `key` = 'ips_mode'");
+    if (!existing.length) {
+      const legacy = await query("SELECT value FROM system_settings WHERE `key` = 'ids_enabled'");
+      const mode = legacy[0]?.value === 'true' ? 'ids' : 'off';
+      await query(
+        'INSERT IGNORE INTO system_settings (`key`, value, description, updated_at) VALUES (?, ?, ?, ?)',
+        ['ips_mode', mode, 'Suricata mode: off, ids (detect), or ips (inline block)', now()]
       );
     }
   } catch (e) {
@@ -749,6 +807,7 @@ async function pruneOldLogs() {
     const tables = [
       ['firewall_logs', 'timestamp'],
       ['dns_logs', 'timestamp'],
+      ['ids_alerts', 'timestamp'],
       ['system_health_snapshots', 'recorded_at'],
     ];
     for (const [table, col] of tables) {

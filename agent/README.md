@@ -68,6 +68,53 @@ Limitations (current iteration): UDP only (no DNS-over-TCP fallback), IPv4
 listener only, and the proxy is an open resolver on all interfaces — run it on
 a trusted LAN and block udp/53 from WAN with a firewall policy.
 
+## Intrusion prevention (Suricata IPS)
+
+Set **Suricata Mode** in Settings to `ids` (detect only) or `ips` (inline
+block). In both modes the agent tails Suricata's `eve.json` and ingests alerts
+into the IDS / IPS Alerts page; the Verdict column shows whether each alert was
+`detected` or `blocked`.
+
+In **IPS mode** the agent additionally installs an nftables NFQUEUE hook
+(`table inet homeshield_ips`) that hands packets to Suricata for an
+accept/drop verdict. Key safety properties:
+
+- **Fail-open** — the queue uses `bypass`, so if Suricata isn't running,
+  packets are accepted. A Suricata crash never takes down connectivity.
+- **Self-healing** — the hook is a separate table at priority 10, independent
+  of your policy ruleset. It's re-asserted every config cycle, so it's
+  restored within `DNS_REFRESH_SECONDS` even after a policy rollback (which
+  flushes the global ruleset).
+
+### Installing Suricata in NFQUEUE mode
+
+1. Install Suricata and update rules:
+
+   ```sh
+   sudo apt install suricata          # or dnf/pacman
+   sudo suricata-update
+   ```
+
+2. Run Suricata reading the same queue number as the **NFQUEUE Number** setting
+   (default 0). For inline drops, signatures must use the `drop` action and
+   Suricata must run in IPS/queue mode:
+
+   ```sh
+   sudo suricata -q 0 --set action-order=pass,drop,reject,alert
+   ```
+
+   Or as a service, set `NFQUEUE` run mode in `/etc/default/suricata` and
+   ensure `eve.json` logging is enabled (it is by default at
+   `/var/log/suricata/eve.json`).
+
+3. Set **Suricata Mode** to `ips` in Settings. The agent installs the hook
+   within one config cycle. Confirm with `sudo nft list table inet homeshield_ips`.
+
+**Avoid locking yourself out:** Suricata drop rules can block legitimate
+traffic. Add Suricata `pass` rules for your management/SSH flows before
+enabling drops, and remember the firewall policy ruleset and the IPS queue are
+independent layers — both must permit your management traffic.
+
 ## Requirements
 
 - Linux with nftables (`nft`) and iproute2 (`ip`)

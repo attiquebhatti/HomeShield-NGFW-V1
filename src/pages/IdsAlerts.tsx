@@ -15,6 +15,12 @@ const severityVariant: Record<string, 'danger' | 'warning' | 'info' | 'neutral'>
 
 const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
+const verdict: Record<string, { label: string; variant: 'danger' | 'warning' | 'neutral' }> = {
+  drop: { label: 'blocked', variant: 'danger' },
+  alert: { label: 'detected', variant: 'warning' },
+  pass: { label: 'passed', variant: 'neutral' },
+};
+
 function timeAgo(ts: string) {
   const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
   if (diff < 60) return `${diff}s ago`;
@@ -62,14 +68,15 @@ export function IdsAlerts() {
   }).sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
 
   const unacked = alerts.filter(a => !a.acknowledged).length;
+  const blocked = alerts.filter(a => a.action === 'drop').length;
 
   return (
     <div className="p-4 lg:p-6 space-y-5">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-xl font-bold text-text-primary">IDS / Alerts</h1>
+          <h1 className="text-xl font-bold text-text-primary">IDS / IPS Alerts</h1>
           <p className="text-sm text-text-muted mt-0.5">
-            {unacked} unacknowledged · Suricata IDS mode
+            {unacked} unacknowledged · {blocked} blocked · Suricata
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -129,15 +136,16 @@ export function IdsAlerts() {
                 <th className="px-4 py-3 text-left text-text-muted font-medium">Source</th>
                 <th className="px-4 py-3 text-left text-text-muted font-medium">Destination</th>
                 <th className="px-4 py-3 text-left text-text-muted font-medium">Proto</th>
+                <th className="px-4 py-3 text-left text-text-muted font-medium">Verdict</th>
                 <th className="px-4 py-3 text-left text-text-muted font-medium">Time</th>
                 <th className="px-4 py-3 text-right text-text-muted font-medium">Action</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-text-muted">Loading alerts...</td></tr>
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-text-muted">Loading alerts...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-text-muted">No alerts found</td></tr>
+                <tr><td colSpan={9} className="px-4 py-12 text-center text-text-muted">No alerts found</td></tr>
               ) : filtered.map(alert => (
                 <tr
                   key={alert.id}
@@ -154,6 +162,11 @@ export function IdsAlerts() {
                   <td className="px-4 py-3 font-mono text-text-secondary">{alert.src_ip ?? '—'}:{alert.src_port ?? '—'}</td>
                   <td className="px-4 py-3 font-mono text-text-secondary">{alert.dst_ip ?? '—'}:{alert.dst_port ?? '—'}</td>
                   <td className="px-4 py-3 text-text-muted uppercase">{alert.protocol ?? '—'}</td>
+                  <td className="px-4 py-3">
+                    <Badge variant={verdict[alert.action]?.variant ?? 'neutral'}>
+                      {verdict[alert.action]?.label ?? alert.action}
+                    </Badge>
+                  </td>
                   <td className="px-4 py-3 text-text-muted whitespace-nowrap">{timeAgo(alert.timestamp)}</td>
                   <td className="px-4 py-3 text-right">
                     {!alert.acknowledged && (

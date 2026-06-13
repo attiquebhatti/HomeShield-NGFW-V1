@@ -189,6 +189,39 @@ The agent machine needs outbound HTTPS to the zone source. Configure the
 source URL templates via the `geoip_source_v4` / `geoip_source_v6` settings
 (`{cc}` is replaced with the lowercase country code).
 
+## IPSec / IKEv2 VPN (client-to-site, for Windows)
+
+A remote-access IKEv2 VPN with EAP (username/password) auth, for Windows
+clients using the built-in IKEv2 stack. Configure it in the VPN page's
+**IPSec / IKEv2** section (endpoint, client pool, DNS, routed subnets), add
+**VPN users**, and enable.
+
+Requirements on the gateway: `strongswan`, `strongswan-swanctl`,
+`strongswan-pki` (the agent `.deb` recommends them).
+
+When enabled, the agent:
+
+- Generates an internal **CA + server certificate** with strongSwan's `pki`
+  (the server identity / SAN is the configured endpoint, so it must match what
+  clients connect to), once, under `/etc/swanctl`.
+- Writes `/etc/swanctl/conf.d/homeshield.conf` (connection + EAP secrets for
+  enabled VPN users) and loads it with `swanctl --load-all`.
+- Installs a self-healing `homeshield_ipsec` nftables table that accepts
+  IKE/NAT-T (udp 500/4500) and ESP and masquerades the client pool, and
+  enables IP forwarding.
+- Uploads the CA certificate to the management server so the **Windows
+  installer** (VPN page → *Windows Installer*) can embed it.
+
+On the Windows test machine, run the downloaded `homeshield-vpn-install.ps1`
+**as Administrator** — it imports the CA, creates the IKEv2 connection, and you
+then connect with a VPN username/password (`rasdial "HomeShield VPN" <user>
+<pass>` or via Settings → VPN).
+
+**Open the endpoint:** make sure udp/500 and udp/4500 reach the gateway (port
+forwarding on your router) and that the endpoint resolves to its public
+address. EAP passwords are stored cleartext (required by MSCHAPv2) — protect
+the database and use encrypted backups.
+
 ## WireGuard VPN
 
 Configure the server and peers on the VPN page. The **server** generates all

@@ -280,6 +280,29 @@ CREATE TABLE IF NOT EXISTS vpn_peers (
   INDEX idx_public_key (public_key)
 );
 
+CREATE TABLE IF NOT EXISTS ipsec_server (
+  id VARCHAR(36) PRIMARY KEY,
+  enabled TINYINT(1) DEFAULT 0,
+  endpoint VARCHAR(255) DEFAULT '',
+  pool_subnet VARCHAR(50) DEFAULT '10.9.0.0/24',
+  dns VARCHAR(100) DEFAULT '1.1.1.1',
+  local_subnets VARCHAR(255) DEFAULT '0.0.0.0/0',
+  ca_cert MEDIUMTEXT,
+  ca_fingerprint VARCHAR(128) DEFAULT '',
+  status VARCHAR(50) DEFAULT 'pending',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS vpn_users (
+  id VARCHAR(36) PRIMARY KEY,
+  username VARCHAR(100) UNIQUE NOT NULL,
+  password VARCHAR(255) NOT NULL,
+  enabled TINYINT(1) DEFAULT 1,
+  last_connected DATETIME NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS app_flows (
   id VARCHAR(36) PRIMARY KEY,
   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,

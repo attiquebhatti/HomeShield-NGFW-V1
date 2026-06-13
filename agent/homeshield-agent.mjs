@@ -33,6 +33,7 @@ import { classifyApp, isIdentified, appFlowFromEvent } from './appid.mjs';
 import { buildThreatTable, splitByFamily } from './threats.mjs';
 import { buildServerConfig, buildVpnNatTable, parseWgDump } from './wg.mjs';
 import { parseZoneFile, buildGeoTable } from './geoip.mjs';
+import { buildSwanctlConf, buildSwanctlSecrets, buildIpsecNatTable } from './ipsec.mjs';
 
 const exec = promisify(execFile);
 
@@ -744,6 +745,104 @@ async function sendVpnTelemetry() {
   }
 }
 
+// ─── IPSec / IKEv2 (strongSwan) ────────────────────────────────────────────
+// Runs a client-to-site IKEv2 EAP VPN server. Generates a CA + server cert on
+// first enable (via strongSwan's `pki`), writes swanctl config, loads it, and
+// applies a firewall/NAT table. Requires strongSwan (`swanctl`, `pki`).
+
+const SWANCTL_DIR = '/etc/swanctl';
+let ipsecConfigHash = '';
+let ipsecActive = false;
+
+async function pki(args, input) {
+  const { stdout } = await exec('pki', args, { input, encoding: 'buffer', maxBuffer: 4 * 1024 * 1024 });
+  return stdout;
+}
+
+async function ensureIpsecCerts(endpoint) {
+  const caCert = join(SWANCTL_DIR, 'x509ca', 'homeshield-ca.pem');
+  try {
+    await statFile(caCert);
+    return false; // already generated
+  } catch { /* generate below */ }
+
+  log('Generating IPSec CA and server certificate...');
+  const caKey = join(SWANCTL_DIR, 'private', 'homeshield-ca-key.pem');
+  const srvKey = join(SWANCTL_DIR, 'private', 'homeshield-server-key.pem');
+  const srvCert = join(SWANCTL_DIR, 'x509', 'homeshield-server.pem');
+
+  await writeFile(caKey, await pki(['--gen', '--type', 'rsa', '--size', '3072', '--outform', 'pem']), { mode: 0o600 });
+  const caPem = await pki(['--self', '--in', caKey, '--type', 'rsa', '--dn', 'CN=HomeShield CA', '--ca', '--lifetime', '3650', '--outform', 'pem']);
+  await writeFile(caCert, caPem, { mode: 0o644 });
+
+  await writeFile(srvKey, await pki(['--gen', '--type', 'rsa', '--size', '3072', '--outform', 'pem']), { mode: 0o600 });
+  const pub = await pki(['--pub', '--in', srvKey, '--type', 'rsa']);
+  const srvPem = await pki(
+    ['--issue', '--cacert', caCert, '--cakey', caKey, '--dn', `CN=${endpoint}`, '--san', endpoint,
+     '--flag', 'serverAuth', '--flag', 'ikeIntermediate', '--lifetime', '1825', '--outform', 'pem'],
+    pub
+  );
+  await writeFile(srvCert, srvPem, { mode: 0o644 });
+  return true;
+}
+
+async function refreshIpsec() {
+  const config = await api('/ipsec-config');
+
+  if (!config.enabled) {
+    if (ipsecActive) {
+      try { await exec('swanctl', ['--terminate', '--ike', 'homeshield-ikev2']); } catch {}
+      try { await exec('nft', ['delete', 'table', 'inet', 'homeshield_ipsec']); } catch {}
+      ipsecActive = false;
+      ipsecConfigHash = '';
+      log('IPSec disabled');
+    }
+    return;
+  }
+  if (!config.endpoint) { log('IPSec enabled but no endpoint set — skipping'); return; }
+
+  await exec('mkdir', ['-p', join(SWANCTL_DIR, 'x509ca'), join(SWANCTL_DIR, 'x509'),
+    join(SWANCTL_DIR, 'private'), join(SWANCTL_DIR, 'conf.d')]).catch(() => {});
+
+  let generated = false;
+  try {
+    generated = await ensureIpsecCerts(config.endpoint);
+  } catch (e) {
+    log('IPSec cert generation failed (is strongSwan `pki` installed?):', e.message);
+    return;
+  }
+
+  // Write connection + EAP secrets, reload only when they change.
+  const conf = buildSwanctlConf(config) + '\n' + buildSwanctlSecrets(config.users || []);
+  const hash = `${conf.length}:${(config.users || []).length}:${config.endpoint}:${config.local_subnets}`;
+  if (hash !== ipsecConfigHash || generated) {
+    await writeFile(join(SWANCTL_DIR, 'conf.d', 'homeshield.conf'), conf, { mode: 0o600 });
+    await exec('swanctl', ['--load-all']);
+    ipsecConfigHash = hash;
+    log(`IPSec config loaded (${(config.users || []).length} users)`);
+  }
+
+  // Firewall + NAT (self-healing) and forwarding.
+  const natFile = join(STATE_DIR, 'ipsec.nft');
+  await writeFile(natFile, buildIpsecNatTable(config.pool_subnet), 'utf8');
+  await exec('nft', ['-f', natFile]);
+  await exec('sysctl', ['-w', 'net.ipv4.ip_forward=1']).catch(() => {});
+
+  // Upload the CA once so clients can be provisioned.
+  if (!config.ca_present) {
+    try {
+      const caPem = await readFile(join(SWANCTL_DIR, 'x509ca', 'homeshield-ca.pem'), 'utf8');
+      await api('/ipsec-ca', { method: 'POST', body: JSON.stringify({ ca_cert: caPem, status: 'active' }) });
+      log('Uploaded IPSec CA to the management server');
+    } catch (e) {
+      log('CA upload failed:', e.message);
+    }
+  }
+
+  if (!ipsecActive) log(`IPSec/IKEv2 active on ${config.endpoint}`);
+  ipsecActive = true;
+}
+
 // ─── Main loop ─────────────────────────────────────────────────────────────
 
 async function main() {
@@ -795,6 +894,11 @@ async function main() {
         await refreshVpn();
       } catch (e) {
         log('VPN refresh error:', e.message);
+      }
+      try {
+        await refreshIpsec();
+      } catch (e) {
+        log('IPSec refresh error:', e.message);
       }
       try {
         await refreshGeoConfig();

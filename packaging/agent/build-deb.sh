@@ -37,7 +37,7 @@ Section: net
 Priority: optional
 Architecture: all
 Depends: nodejs (>= 18), nftables, iproute2
-Recommends: wireguard-tools, suricata
+Recommends: wireguard-tools, suricata, strongswan, strongswan-swanctl, strongswan-pki
 Maintainer: HomeShield <noreply@homeshield.local>
 Description: HomeShield NGFW enforcement agent
  Applies firewall, IPS, threat-intel, GeoIP, DNS and WireGuard configuration

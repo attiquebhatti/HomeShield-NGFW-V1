@@ -18,8 +18,9 @@ User=root
 NoNewPrivileges=yes
 ProtectSystem=full
 ProtectHome=yes
-# /etc/wireguard is writable so the agent can manage WireGuard configs
-ReadWritePaths=/var/lib/homeshield /etc/wireguard
+# /etc/wireguard and /etc/swanctl are writable so the agent can manage the
+# WireGuard and strongSwan (IPSec) configs it generates.
+ReadWritePaths=/var/lib/homeshield /etc/wireguard /etc/swanctl
 
 [Install]
 WantedBy=multi-user.target

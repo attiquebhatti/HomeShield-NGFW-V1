@@ -880,13 +880,13 @@ api.get('/agent-download/windows', (req, res) => {
 api.get('/agent-download/windows-cmd', (req, res) => {
   try {
     if ((req.user.role || 'admin') !== 'admin') return res.status(403).json({ error: 'Admin role required' });
-    if (!AGENT_TOKEN) return res.status(409).json({ error: 'Set AGENT_TOKEN on the server first' });
+    if (!effectiveAgentToken()) return res.status(409).json({ error: 'Generate an agent token first' });
     const scriptPath = join(__dirname, 'agent-windows', 'homeshield-agent.ps1');
     if (!existsSync(scriptPath)) return res.status(404).json({ error: 'Windows agent not bundled with this build' });
     const agentScript = readFileSync(scriptPath, 'utf8');
     const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
     const host = req.get('host') || '';
-    const cmd = buildWindowsCmd(agentScript, host ? `${proto}://${host}` : '', AGENT_TOKEN);
+    const cmd = buildWindowsCmd(agentScript, host ? `${proto}://${host}` : '', effectiveAgentToken());
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', 'attachment; filename="homeshield-install.cmd"');
     res.send(cmd);
@@ -899,7 +899,36 @@ api.get('/agent-download/windows-cmd', (req, res) => {
 // copy the install command; other roles get just the enabled flag.
 api.get('/agent-status', (req, res) => {
   const isAdmin = (req.user.role || 'admin') === 'admin';
-  res.json({ data: { agent_api_enabled: !!AGENT_TOKEN, token: isAdmin ? (AGENT_TOKEN || '') : undefined } });
+  const token = effectiveAgentToken();
+  res.json({
+    data: {
+      agent_api_enabled: !!token,
+      env_managed: agentTokenIsEnvManaged(),
+      token: isAdmin ? token : undefined,
+    },
+  });
+});
+
+// Generate (or rotate) the agent token from the console. Admin-only. Disabled
+// when AGENT_TOKEN is set via the environment (that takes precedence).
+api.post('/agent-token/generate', async (req, res) => {
+  try {
+    if ((req.user.role || 'admin') !== 'admin') return res.status(403).json({ error: 'Admin role required' });
+    if (agentTokenIsEnvManaged()) return res.status(409).json({ error: 'Agent token is managed by the AGENT_TOKEN environment variable' });
+    const token = randomBytes(32).toString('hex');
+    await query(
+      "INSERT INTO server_secrets (`key`, value, updated_at) VALUES ('agent_token', ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
+      [token, now()]
+    );
+    agentTokenCache = token;
+    await query(
+      'INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [randomUUID(), now(), req.user.email, 'agent_token_rotate', 'agent', null, '{}', req.ip || '']
+    );
+    res.json({ data: { token } });
+  } catch (e) {
+    serverError(res, 'agent-token generate', e);
+  }
 });
 
 // ─── Devices (inventory) ───────────────────────────────────────────────────
@@ -1267,17 +1296,18 @@ api.post('/system-settings', async (req, res) => {
 
 // ─── Agent API ─────────────────────────────────────────────────────────────
 // Used by the enforcement agent (agent/homeshield-agent.mjs). Authenticated
-// with a shared secret (AGENT_TOKEN env var) instead of a user JWT. If
-// AGENT_TOKEN is not set, these endpoints are disabled.
+// with a shared secret. The effective token is the AGENT_TOKEN env var if set
+// (takes precedence), otherwise a token generated/stored in the DB and managed
+// from the console. If neither is set, these endpoints are disabled.
 
-const AGENT_TOKEN = process.env.AGENT_TOKEN || '';
 const agent = express.Router();
 
 agent.use((req, res, next) => {
-  if (!AGENT_TOKEN) return res.status(503).json({ error: 'Agent API disabled — set AGENT_TOKEN' });
+  const expected = effectiveAgentToken();
+  if (!expected) return res.status(503).json({ error: 'Agent API disabled — set or generate an agent token' });
   const token = req.headers['x-agent-token'] || '';
   const a = Buffer.from(String(token));
-  const b = Buffer.from(AGENT_TOKEN);
+  const b = Buffer.from(expected);
   if (a.length !== b.length || !timingSafeEqual(a, b)) {
     return res.status(401).json({ error: 'Invalid agent token' });
   }
@@ -1755,6 +1785,11 @@ async function ensureVpnTables() {
       INDEX idx_timestamp (timestamp),
       INDEX idx_application (application)
     )`);
+    await getPool().query(`CREATE TABLE IF NOT EXISTS server_secrets (
+      \`key\` VARCHAR(64) PRIMARY KEY,
+      value TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
     await getPool().query(`CREATE TABLE IF NOT EXISTS devices (
       id VARCHAR(36) PRIMARY KEY,
       hostname VARCHAR(255) DEFAULT '',
@@ -1800,6 +1835,25 @@ async function getOrCreateIpsecServer() {
   const id = randomUUID();
   await query('INSERT INTO ipsec_server (id, created_at, updated_at) VALUES (?, ?, ?)', [id, now(), now()]);
   return (await query('SELECT * FROM ipsec_server WHERE id = ? LIMIT 1', [id]))[0];
+}
+
+// Agent shared-secret. The AGENT_TOKEN env var wins if set; otherwise a token
+// generated from the console and stored in server_secrets is used. Cached in
+// memory so the per-request agent auth check stays fast.
+let agentTokenCache = '';
+function effectiveAgentToken() {
+  return process.env.AGENT_TOKEN || agentTokenCache || '';
+}
+function agentTokenIsEnvManaged() {
+  return !!process.env.AGENT_TOKEN;
+}
+async function loadAgentToken() {
+  try {
+    const rows = await query("SELECT value FROM server_secrets WHERE `key` = 'agent_token' LIMIT 1");
+    agentTokenCache = rows[0]?.value || '';
+  } catch (e) {
+    console.error('loadAgentToken failed:', e.message);
+  }
 }
 
 // Adds RBAC/MFA columns to admin_users on existing databases. Idempotent.
@@ -1994,10 +2048,11 @@ async function refreshDueFeeds() {
 
 // ─── Start ─────────────────────────────────────────────────────────────────
 
-autoMigrate().then(() => {
-  ensureVpnTables();
-  ensureUserColumns();
-  ensureDefaultSettings();
+autoMigrate().then(async () => {
+  await ensureVpnTables();
+  await ensureUserColumns();
+  await ensureDefaultSettings();
+  await loadAgentToken();
   pruneOldLogs();
   setInterval(pruneOldLogs, 24 * 60 * 60 * 1000);
   refreshDueFeeds();
@@ -2006,6 +2061,7 @@ autoMigrate().then(() => {
     console.log(`HomeShield running on port ${PORT}`);
     console.log(`DB: ${process.env.DB_HOST}/${process.env.DB_NAME}`);
     console.log(`dist/: ${existsSync(distDir) ? 'ready' : 'MISSING'}`);
-    console.log(`Agent API: ${AGENT_TOKEN ? 'enabled' : 'disabled (set AGENT_TOKEN to enable)'}`);
+    const tokenSrc = agentTokenIsEnvManaged() ? 'env' : (effectiveAgentToken() ? 'console-generated' : 'none');
+    console.log(`Agent API: ${effectiveAgentToken() ? `enabled (${tokenSrc})` : 'disabled (generate a token in the console or set AGENT_TOKEN)'}`);
   });
 });

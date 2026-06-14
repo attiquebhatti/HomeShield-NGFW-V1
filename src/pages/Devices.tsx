@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { RefreshCw, Trash2, Monitor, Server, Smartphone, HelpCircle, Download, Plus, AlertTriangle, Copy, Check } from 'lucide-react';
 import { api } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import { Card, CardHeader } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -34,9 +35,13 @@ export function Devices() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [installOpen, setInstallOpen] = useState(false);
   const [agentEnabled, setAgentEnabled] = useState(true);
   const [agentToken, setAgentToken] = useState('');
+  const [envManaged, setEnvManaged] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
 
   async function fetchDevices() {
@@ -45,12 +50,23 @@ export function Devices() {
     setLoading(false);
   }
 
+  async function fetchAgentStatus() {
+    const r = await api.get<{ agent_api_enabled: boolean; env_managed?: boolean; token?: string }>('agent-status');
+    setAgentEnabled(r.data?.agent_api_enabled ?? true);
+    setEnvManaged(r.data?.env_managed ?? false);
+    setAgentToken(r.data?.token ?? '');
+  }
+
+  async function generateToken() {
+    setGenerating(true);
+    await api.post('agent-token/generate');
+    await fetchAgentStatus();
+    setGenerating(false);
+  }
+
   useEffect(() => {
     fetchDevices();
-    api.get<{ agent_api_enabled: boolean; token?: string }>('agent-status').then(r => {
-      setAgentEnabled(r.data?.agent_api_enabled ?? true);
-      setAgentToken(r.data?.token ?? '');
-    });
+    fetchAgentStatus();
     const t = setInterval(fetchDevices, 15000);
     return () => clearInterval(t);
   }, []);
@@ -86,9 +102,14 @@ export function Devices() {
       </div>
 
       {!agentEnabled && (
-        <div className="flex items-start gap-2 px-4 py-3 bg-warning/10 border border-warning/20 rounded-xl text-sm text-warning">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-          <span>The agent API is disabled — set <code className="font-mono">AGENT_TOKEN</code> in the server environment and restart, or agents can't enroll.</span>
+        <div className="flex items-center justify-between gap-3 px-4 py-3 bg-warning/10 border border-warning/20 rounded-xl text-sm text-warning flex-wrap">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span>The agent API is disabled — no agent token is set, so agents can't enroll.</span>
+          </div>
+          {isAdmin && !envManaged && (
+            <Button variant="secondary" size="sm" onClick={generateToken} loading={generating}>Generate Token</Button>
+          )}
         </div>
       )}
 
@@ -169,10 +190,19 @@ export function Devices() {
               execution-policy steps. The server URL and token are baked in.
             </p>
             {!agentToken && (
-              <p className="text-xs text-warning">
-                No <code className="font-mono">AGENT_TOKEN</code> is set on the server — set one in the server
-                environment and restart before downloading.
-              </p>
+              envManaged ? (
+                <p className="text-xs text-warning">
+                  <code className="font-mono">AGENT_TOKEN</code> is managed by the server environment but appears empty —
+                  set it and restart the server.
+                </p>
+              ) : isAdmin ? (
+                <div className="flex items-center gap-2 px-3 py-2 bg-warning/10 border border-warning/20 rounded-lg">
+                  <span className="text-xs text-warning flex-1">No agent token yet — generate one to enable enrollment and downloads.</span>
+                  <Button variant="primary" size="sm" onClick={generateToken} loading={generating}>Generate Token</Button>
+                </div>
+              ) : (
+                <p className="text-xs text-warning">No agent token is set — ask an admin to generate one.</p>
+              )
             )}
 
             {/* Advanced: raw .ps1 + manual command */}

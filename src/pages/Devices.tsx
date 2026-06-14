@@ -189,20 +189,33 @@ export function Devices() {
               Double-click the downloaded file and approve the <strong>UAC</strong> prompt — no PowerShell or
               execution-policy steps. The server URL and token are baked in.
             </p>
-            {!agentToken && (
-              envManaged ? (
-                <p className="text-xs text-warning">
-                  <code className="font-mono">AGENT_TOKEN</code> is managed by the server environment but appears empty —
-                  set it and restart the server.
-                </p>
-              ) : isAdmin ? (
-                <div className="flex items-center gap-2 px-3 py-2 bg-warning/10 border border-warning/20 rounded-lg">
-                  <span className="text-xs text-warning flex-1">No agent token yet — generate one to enable enrollment and downloads.</span>
-                  <Button variant="primary" size="sm" onClick={generateToken} loading={generating}>Generate Token</Button>
-                </div>
-              ) : (
-                <p className="text-xs text-warning">No agent token is set — ask an admin to generate one.</p>
-              )
+            {agentToken ? (
+              <div className="flex items-center gap-2 px-3 py-2 bg-success/10 border border-success/20 rounded-lg">
+                <Check className="w-3.5 h-3.5 text-success flex-shrink-0" />
+                <span className="text-xs text-success flex-1">
+                  Agent token configured{envManaged ? ' (from server environment)' : ''} — enrollment is enabled.
+                </span>
+                {isAdmin && !envManaged && (
+                  <button
+                    onClick={() => { if (confirm('Rotate the agent token? Already-installed agents will stop connecting until reinstalled with the new token.')) generateToken(); }}
+                    disabled={generating}
+                    className="text-xs text-text-muted hover:text-text-primary underline disabled:opacity-50">
+                    {generating ? 'Rotating…' : 'Rotate'}
+                  </button>
+                )}
+              </div>
+            ) : envManaged ? (
+              <p className="text-xs text-warning">
+                <code className="font-mono">AGENT_TOKEN</code> is managed by the server environment but appears empty —
+                set it and restart the server.
+              </p>
+            ) : isAdmin ? (
+              <div className="flex items-center gap-2 px-3 py-2 bg-warning/10 border border-warning/20 rounded-lg">
+                <span className="text-xs text-warning flex-1">No agent token yet — generate one to enable enrollment and downloads.</span>
+                <Button variant="primary" size="sm" onClick={generateToken} loading={generating}>Generate Token</Button>
+              </div>
+            ) : (
+              <p className="text-xs text-warning">No agent token is set — ask an admin to generate one.</p>
             )}
 
             {/* Advanced: raw .ps1 + manual command */}

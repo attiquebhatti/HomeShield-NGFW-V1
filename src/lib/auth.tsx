@@ -12,6 +12,7 @@ interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
   signIn: (email: string, password: string, code?: string) => Promise<{ error: string | null; mfaRequired: boolean }>;
+  googleSignIn: (credential: string, code?: string) => Promise<{ error: string | null; mfaRequired: boolean }>;
   refreshUser: () => Promise<void>;
   signOut: () => void;
 }
@@ -41,6 +42,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { error: null, mfaRequired: false };
   }
 
+  async function googleSignIn(credential: string, code?: string): Promise<{ error: string | null; mfaRequired: boolean }> {
+    const res = await api.auth.googleSignIn(credential, code);
+    if (res.error) return res;
+    setUser(await api.auth.getUser());
+    return { error: null, mfaRequired: false };
+  }
+
   async function refreshUser() {
     setUser(await api.auth.getUser());
   }
@@ -51,7 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, refreshUser, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signIn, googleSignIn, refreshUser, signOut }}>
       {children}
     </AuthContext.Provider>
   );

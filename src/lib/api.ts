@@ -92,6 +92,26 @@ export const auth = {
     });
   },
 
+  async getConfig() {
+    const res = await apiFetch<{ first_run: boolean; open_signup: boolean; google_client_id: string | null }>('auth/config');
+    return res.data;
+  },
+
+  async googleSignIn(credential: string, code?: string): Promise<{ error: string | null; mfaRequired: boolean }> {
+    try {
+      const res = await fetch(`${API_BASE}/auth/google`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential, code }),
+      });
+      const json = await res.json();
+      if (!res.ok) return { error: json.error || `HTTP ${res.status}`, mfaRequired: !!json.mfa_required };
+      if (json.token) setToken(json.token);
+      return { error: null, mfaRequired: false };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : 'Network error', mfaRequired: false };
+    }
+  },
+
   async getUser(): Promise<AuthUserInfo | null> {
     if (!getToken()) return null;
     const res = await apiFetch<{ user: AuthUserInfo }>('auth/me');

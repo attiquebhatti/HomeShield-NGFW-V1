@@ -236,20 +236,6 @@ export function Devices() {
               </div>
             </details>
           </div>
-
-          {/* Linux */}
-          <div className="space-y-2 pt-3 border-t border-border-muted">
-            <div className="flex items-center gap-2 text-sm font-semibold text-text-primary">
-              <Server className="w-4 h-4 text-warning" /> Linux (gateway / host)
-            </div>
-            <p className="text-xs text-text-muted">
-              Build and install the <code className="font-mono">.deb</code> on the Linux machine
-              (<code className="font-mono">packaging/agent/build-deb.sh</code>), set
-              <code className="font-mono"> /etc/homeshield/agent.env</code>, then
-              <code className="font-mono"> systemctl enable --now homeshield-agent</code>. This host runs nftables
-              enforcement and the IPSec/WireGuard VPN <em>server</em>. See <code className="font-mono">agent/README.md</code>.
-            </p>
-          </div>
         </div>
       </Modal>
 

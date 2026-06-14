@@ -39,11 +39,12 @@ const groups: SettingsGroup[] = [
   {
     label: 'Security',
     icon: Shield,
-    keys: ['rollback_timer_seconds', 'dns_filtering_enabled', 'dns_upstream'],
+    keys: ['rollback_timer_seconds', 'dns_filtering_enabled', 'dns_upstream', 'open_signup_enabled'],
     fields: {
       rollback_timer_seconds: { label: 'Rollback Timer (seconds)', type: 'number', placeholder: '30' },
       dns_filtering_enabled: { label: 'DNS Filtering', type: 'boolean' },
       dns_upstream: { label: 'Upstream DNS Resolver', type: 'text', placeholder: '1.1.1.1' },
+      open_signup_enabled: { label: 'Allow Self-Signup (new users = viewer)', type: 'boolean' },
     },
   },
   {

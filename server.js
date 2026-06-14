@@ -13,6 +13,7 @@ import { generateSecret, verifyTOTP, otpauthURL } from './totp.mjs';
 import { renderPrometheus, groupSamples } from './metrics.mjs';
 import { buildWindowsInstaller } from './ipsec.mjs';
 import { buildWindowsBootstrap, buildWindowsCmd } from './bootstrap.mjs';
+import { verifyGoogleIdToken } from './google.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -267,26 +268,100 @@ app.get('/metrics', async (req, res) => {
   }
 });
 
-// Signup is only open while no admin account exists (first-run setup).
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+
+async function anyUsersExist() {
+  return (await query('SELECT id FROM admin_users LIMIT 1')).length > 0;
+}
+async function openSignupEnabled() {
+  const rows = await query("SELECT value FROM system_settings WHERE `key` = 'open_signup_enabled' LIMIT 1");
+  return rows[0]?.value !== 'false'; // default enabled
+}
+
+// Public auth config so the login page can adapt (first-run vs sign-up,
+// Google button, whether self-signup is allowed).
+app.get('/api/auth/config', async (_req, res) => {
+  try {
+    const firstRun = !(await anyUsersExist());
+    res.json({
+      data: {
+        first_run: firstRun,
+        open_signup: firstRun || (await openSignupEnabled()),
+        google_client_id: GOOGLE_CLIENT_ID || null,
+      },
+    });
+  } catch (e) {
+    serverError(res, 'auth config', e);
+  }
+});
+
+// Signup. The first account (first-run) is an admin; every later self-signup
+// is a viewer (read-only). Admins promote roles from the Users page. Later
+// signups require open_signup_enabled.
 app.post('/api/auth/signup', authRateLimit, async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password || password.length < 12)
       return res.status(400).json({ error: 'Password must be at least 12 characters' });
 
-    const existing = await query('SELECT id FROM admin_users LIMIT 1');
-    if (existing.length > 0)
-      return res.status(403).json({ error: 'Signup is disabled — an admin account already exists. Please sign in.' });
+    const firstRun = !(await anyUsersExist());
+    if (!firstRun && !(await openSignupEnabled()))
+      return res.status(403).json({ error: 'Self-signup is disabled. Ask an admin to create your account.' });
 
-    // The first account (first-run setup) is always an admin.
-    const passwordHash = await hash(password, 12);
+    const exists = await query('SELECT id FROM admin_users WHERE email = ? LIMIT 1', [email]);
+    if (exists.length) return res.status(409).json({ error: 'An account with that email already exists. Please sign in.' });
+
+    const role = firstRun ? 'admin' : 'viewer';
     await query(
-      "INSERT INTO admin_users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, 'admin', ?)",
-      [randomUUID(), email, passwordHash, now()]
+      'INSERT INTO admin_users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
+      [randomUUID(), email, await hash(password, 12), role, now()]
     );
-    res.json({ message: 'Account created. Please sign in.' });
+    res.json({ message: firstRun ? 'Admin account created. Please sign in.' : 'Account created. Please sign in.', role });
   } catch (e) {
     serverError(res, 'signup', e);
+  }
+});
+
+// Sign in / up with a Google ID token (Google Identity Services). New users
+// are created as viewer (or admin on first run); existing users sign in.
+app.post('/api/auth/google', authRateLimit, async (req, res) => {
+  try {
+    if (!GOOGLE_CLIENT_ID) return res.status(503).json({ error: 'Google sign-in is not configured on this server' });
+    const { credential } = req.body || {};
+    if (!credential) return res.status(400).json({ error: 'Missing Google credential' });
+
+    let profile;
+    try {
+      profile = await verifyGoogleIdToken(credential, GOOGLE_CLIENT_ID);
+    } catch (e) {
+      return res.status(401).json({ error: `Google sign-in failed: ${e.message}` });
+    }
+
+    let rows = await query('SELECT id, email, role, mfa_secret, mfa_enabled FROM admin_users WHERE email = ? LIMIT 1', [profile.email]);
+    if (!rows.length) {
+      const firstRun = !(await anyUsersExist());
+      if (!firstRun && !(await openSignupEnabled()))
+        return res.status(403).json({ error: 'Self-signup is disabled. Ask an admin to create your account.' });
+      const id = randomUUID();
+      // Google users authenticate via Google; set an unusable random password.
+      await query(
+        'INSERT INTO admin_users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
+        [id, profile.email, await hash(randomBytes(24).toString('hex'), 12), firstRun ? 'admin' : 'viewer', now()]
+      );
+      rows = await query('SELECT id, email, role, mfa_secret, mfa_enabled FROM admin_users WHERE id = ? LIMIT 1', [id]);
+    }
+
+    // Honour MFA if the account has it enabled (Google alone isn't enough).
+    if (rows[0].mfa_enabled) {
+      const { code } = req.body || {};
+      if (!code) return res.status(401).json({ error: 'MFA code required', mfa_required: true });
+      if (!verifyTOTP(rows[0].mfa_secret, code)) return res.status(401).json({ error: 'Invalid MFA code', mfa_required: true });
+    }
+
+    const user = { id: rows[0].id, email: rows[0].email, role: rows[0].role || 'viewer' };
+    res.json({ token: jwtSign(user), user });
+  } catch (e) {
+    serverError(res, 'google auth', e);
   }
 });
 
@@ -1906,6 +1981,7 @@ async function ensureDefaultSettings() {
     ['geoip_countries', '', 'Comma-separated ISO country codes for GeoIP filtering'],
     ['geoip_source_v4', 'https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone', 'IPv4 country zone URL template ({cc} = country code)'],
     ['geoip_source_v6', 'https://www.ipdeny.com/ipv6/ipaddresses/aggregated/{cc}-aggregated.zone', 'IPv6 country zone URL template'],
+    ['open_signup_enabled', 'true', 'Allow self-signup (new users become viewers)'],
   ];
   try {
     for (const [key, value, description] of defaults) {

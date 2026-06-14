@@ -1,10 +1,10 @@
-import { useState, FormEvent } from 'react';
+import { useState, useEffect, useRef, FormEvent } from 'react';
 import { Shield, Eye, EyeOff, AlertCircle, Lock } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 
 export function Login() {
-  const { signIn } = useAuth();
+  const { signIn, googleSignIn } = useAuth();
   const [mode, setMode] = useState<'login' | 'setup'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -15,6 +15,46 @@ export function Login() {
   const [setupDone, setSetupDone] = useState(false);
   const [mfaStep, setMfaStep] = useState(false);
   const [code, setCode] = useState('');
+  const [firstRun, setFirstRun] = useState(false);
+  const [openSignup, setOpenSignup] = useState(true);
+  const [googleClientId, setGoogleClientId] = useState<string | null>(null);
+  const googleBtnRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    api.auth.getConfig().then(cfg => {
+      if (!cfg) return;
+      setFirstRun(cfg.first_run);
+      setOpenSignup(cfg.open_signup);
+      setGoogleClientId(cfg.google_client_id);
+      if (cfg.first_run) setMode('setup');
+    });
+  }, []);
+
+  // Render the Google Identity Services button once we know the client id.
+  useEffect(() => {
+    if (!googleClientId) return;
+    function init() {
+      const g = (window as unknown as { google?: any }).google;
+      if (!g?.accounts?.id || !googleBtnRef.current) return;
+      g.accounts.id.initialize({
+        client_id: googleClientId,
+        callback: async (resp: { credential: string }) => {
+          setError('');
+          const { error: gerr } = await googleSignIn(resp.credential);
+          if (gerr) setError(gerr);
+        },
+      });
+      googleBtnRef.current.innerHTML = '';
+      g.accounts.id.renderButton(googleBtnRef.current, { theme: 'filled_black', size: 'large', text: 'continue_with', width: 300 });
+    }
+    const existing = document.getElementById('gis-script');
+    if (existing) { init(); return; }
+    const s = document.createElement('script');
+    s.id = 'gis-script';
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.async = true; s.defer = true; s.onload = init;
+    document.body.appendChild(s);
+  }, [googleClientId, googleSignIn]);
 
   async function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -65,8 +105,10 @@ export function Login() {
           <div className="w-16 h-16 bg-success/15 border border-success/25 rounded-2xl flex items-center justify-center mx-auto">
             <Shield className="w-8 h-8 text-success" />
           </div>
-          <h2 className="text-xl font-bold text-text-primary">Admin account created</h2>
-          <p className="text-sm text-text-muted">Your admin account is ready. Sign in to continue.</p>
+          <h2 className="text-xl font-bold text-text-primary">{firstRun ? 'Admin account created' : 'Account created'}</h2>
+          <p className="text-sm text-text-muted">
+            {firstRun ? 'Your admin account is ready. Sign in to continue.' : 'Your account is ready (standard access). Sign in to continue.'}
+          </p>
           <button onClick={() => { setMode('login'); setSetupDone(false); }} className="text-brand-gold hover:text-brand-gold-bright text-sm underline">
             Back to sign in
           </button>
@@ -87,19 +129,21 @@ export function Login() {
         </div>
 
         <div className="bg-brand-panel border border-border-muted rounded-2xl p-8 shadow-panel-lg">
-          <div className="flex gap-1 mb-6 bg-brand-slate p-1 rounded-lg">
-            {(['login', 'setup'] as const).map(tab => (
-              <button
-                key={tab}
-                onClick={() => { setMode(tab); setError(''); }}
-                className={`flex-1 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  mode === tab ? 'bg-brand-panel-soft text-text-primary' : 'text-text-muted hover:text-text-secondary'
-                }`}
-              >
-                {tab === 'login' ? 'Sign In' : 'First-Run Setup'}
-              </button>
-            ))}
-          </div>
+          {(firstRun || openSignup) && (
+            <div className="flex gap-1 mb-6 bg-brand-slate p-1 rounded-lg">
+              {(['login', 'setup'] as const).map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => { setMode(tab); setError(''); }}
+                  className={`flex-1 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    mode === tab ? 'bg-brand-panel-soft text-text-primary' : 'text-text-muted hover:text-text-secondary'
+                  }`}
+                >
+                  {tab === 'login' ? 'Sign In' : firstRun ? 'First-Run Setup' : 'Sign Up'}
+                </button>
+              ))}
+            </div>
+          )}
 
           <form onSubmit={mode === 'login' ? handleLogin : handleSetup} className="space-y-4">
             <div>
@@ -190,9 +234,20 @@ export function Login() {
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
               ) : <Lock className="w-4 h-4" />}
-              {mode === 'setup' ? 'Create Admin Account' : mfaStep ? 'Verify & Sign In' : 'Sign In'}
+              {mode === 'setup' ? (firstRun ? 'Create Admin Account' : 'Sign Up') : mfaStep ? 'Verify & Sign In' : 'Sign In'}
             </button>
           </form>
+
+          {googleClientId && (
+            <div className="mt-5">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="flex-1 h-px bg-border-muted" />
+                <span className="text-xs text-text-muted">or</span>
+                <div className="flex-1 h-px bg-border-muted" />
+              </div>
+              <div ref={googleBtnRef} className="flex justify-center" />
+            </div>
+          )}
         </div>
 
         <p className="text-center text-xs text-text-muted/60">

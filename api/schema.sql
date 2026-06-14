@@ -184,6 +184,7 @@ INSERT IGNORE INTO system_settings (`key`, value, description) VALUES
   ('geoip_countries', '', 'Comma-separated ISO country codes for GeoIP filtering'),
   ('geoip_source_v4', 'https://www.ipdeny.com/ipblocks/data/aggregated/{cc}-aggregated.zone', 'IPv4 country zone URL template'),
   ('geoip_source_v6', 'https://www.ipdeny.com/ipv6/ipaddresses/aggregated/{cc}-aggregated.zone', 'IPv6 country zone URL template'),
+  ('open_signup_enabled', 'true', 'Allow self-signup (new users become viewers)'),
   ('log_retention_days', '90', 'Log retention in days'),
   ('dashboard_refresh_seconds', '15', 'Dashboard auto-refresh interval');
 

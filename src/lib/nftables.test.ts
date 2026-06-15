@@ -141,8 +141,10 @@ describe('compileWindowsFirewall', () => {
 
 describe('device-ID matching', () => {
   const devices = [
-    { id: 'dev-1', hostname: 'attiques-laptop', ip_address: '192.168.1.50' },
-    { id: 'dev-2', hostname: 'no-ip-device', ip_address: null },
+    { id: 'dev-1', hostname: 'attiques-laptop', ip_address: '192.168.1.50', tags: ['corporate'] },
+    { id: 'dev-2', hostname: 'no-ip-device', ip_address: null, tags: ['iot'] },
+    { id: 'dev-3', hostname: 'thermostat', ip_address: '192.168.1.71', tags: ['iot'] },
+    { id: 'dev-4', hostname: 'camera', ip_address: '192.168.1.72', tags: ['iot'] },
   ];
 
   it('resolves a source device to its IP in nftables', () => {
@@ -157,7 +159,7 @@ describe('device-ID matching', () => {
 
   it('skips a rule whose device has no known IP (never matches everything)', () => {
     const out = compileNftables([policy({ name: 'NoIP', src_device: 'dev-2' })], devices);
-    expect(out).toContain('# Skipped "NoIP": referenced device has no known IP yet');
+    expect(out).toContain('# Skipped "NoIP": device/group has no member with a known IP yet');
     expect(out).not.toContain('ip saddr');
   });
 
@@ -175,6 +177,27 @@ describe('device-ID matching', () => {
     expect(validatePolicies([policy({ src_device: 'dev-1' })], devices)).toEqual([]);
     expect(validatePolicies([policy({ src_device: 'dev-404' })], devices)[0]).toMatch(/no longer enrolled/);
     expect(validatePolicies([policy({ dst_device: 'dev-2' })], devices)[0]).toMatch(/no known IP/);
+  });
+
+  it('resolves a tag/group to an nftables set of member IPs', () => {
+    const out = compileNftables([policy({ name: 'IoT', src_device: 'tag:iot', action: 'deny' })], devices);
+    // dev-2 has no IP and is excluded; dev-3 and dev-4 form the set
+    expect(out).toContain('ip saddr { 192.168.1.71, 192.168.1.72 }');
+  });
+
+  it('resolves a tag to a comma-separated Windows address list', () => {
+    const out = compileWindowsFirewall([policy({ name: 'IoT', src_device: 'tag:iot', direction: 'inbound' })], devices);
+    expect(out).toContain('-RemoteAddress "192.168.1.71,192.168.1.72"');
+  });
+
+  it('skips a rule whose group has no member with an IP', () => {
+    const out = compileNftables([policy({ name: 'EmptyGrp', src_device: 'tag:nonexistent' })], devices);
+    expect(out).toContain('# Skipped "EmptyGrp"');
+  });
+
+  it('validates group references', () => {
+    expect(validatePolicies([policy({ src_device: 'tag:iot' })], devices)).toEqual([]);
+    expect(validatePolicies([policy({ src_device: 'tag:ghosts' })], devices)[0]).toMatch(/no enrolled devices/);
   });
 });
 

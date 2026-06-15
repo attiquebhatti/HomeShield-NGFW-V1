@@ -48,7 +48,7 @@ const emptyPolicy: Omit<FirewallPolicy, 'id' | 'created_at' | 'updated_at'> = {
   log_enabled: true,
 };
 
-interface DeviceOption { id: string; hostname: string; ip_address: string; os?: string; }
+interface DeviceOption { id: string; hostname: string; ip_address: string; os?: string; tags?: string[]; }
 interface AppOption { name: string; category: string; risk: number }
 interface AppCatalog { applications: AppOption[]; categories: string[]; }
 
@@ -78,6 +78,19 @@ function PolicyForm({
   catalog: AppCatalog;
 }) {
   const isL7 = value.app_id !== 'any' || value.url_category !== 'any';
+  const groupTags = [...new Set(devices.flatMap(d => d.tags || []))].sort();
+  const deviceOptions = (
+    <>
+      {groupTags.length > 0 && (
+        <optgroup label="Groups">
+          {groupTags.map(t => <option key={t} value={`tag:${t}`}>group: {t}</option>)}
+        </optgroup>
+      )}
+      <optgroup label="Devices">
+        {devices.map(d => <option key={d.id} value={d.id}>{d.hostname || d.id.slice(0, 8)} ({d.ip_address || 'no IP'})</option>)}
+      </optgroup>
+    </>
+  );
   const set = (key: string, val: unknown) => onChange({ ...value, [key]: val });
   const i = 'w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-brand-gold/50 focus:ring-1 focus:ring-brand-gold/20 transition-all';
   const l = 'block text-xs font-medium text-text-muted mb-1';
@@ -111,17 +124,17 @@ function PolicyForm({
           </select>
         </div>
         <div>
-          <label className={l}>Source Device</label>
+          <label className={l}>Source Device / Group</label>
           <select className={i} value={value.src_device} onChange={e => set('src_device', e.target.value)}>
             <option value="any">Any (use IP/CIDR)</option>
-            {devices.map(d => <option key={d.id} value={d.id}>{d.hostname || d.id.slice(0, 8)} ({d.ip_address || 'no IP'})</option>)}
+            {deviceOptions}
           </select>
         </div>
         <div>
-          <label className={l}>Destination Device</label>
+          <label className={l}>Destination Device / Group</label>
           <select className={i} value={value.dst_device} onChange={e => set('dst_device', e.target.value)}>
             <option value="any">Any (use IP/CIDR)</option>
-            {devices.map(d => <option key={d.id} value={d.id}>{d.hostname || d.id.slice(0, 8)} ({d.ip_address || 'no IP'})</option>)}
+            {deviceOptions}
           </select>
         </div>
         <div>
@@ -316,7 +329,8 @@ export function Policies() {
   useEffect(() => { fetchPolicies(); fetchDevices(); fetchCatalog(); }, []);
   useEffect(() => () => { if (countdownRef.current) clearInterval(countdownRef.current); }, []);
 
-  const deviceName = (id: string) => devices.find(d => d.id === id)?.hostname || `${id.slice(0, 8)}…`;
+  const deviceName = (ref: string) =>
+    ref.startsWith('tag:') ? `group: ${ref.slice(4)}` : (devices.find(d => d.id === ref)?.hostname || `${ref.slice(0, 8)}…`);
 
   function openCreate() {
     setEditTarget(null);

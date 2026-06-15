@@ -1,39 +1,43 @@
 import type { FirewallPolicy } from './database.types';
 
-/** Minimal device shape used to resolve device-ID matches to IP addresses. */
+/** Minimal device shape used to resolve device-ID / group matches to IPs. */
 export interface DeviceRef {
   id: string;
   hostname?: string;
   ip_address?: string | null;
-}
-
-function buildDeviceMap(devices: DeviceRef[] = []): Map<string, DeviceRef> {
-  const map = new Map<string, DeviceRef>();
-  for (const d of devices) map.set(d.id, d);
-  return map;
+  tags?: string[];
 }
 
 /**
- * Resolves a policy's device-ID matches (src_device / dst_device) into the
- * referenced device's current IP, returning an effective rule. Returns null if
- * a referenced device is unknown or has no IP, so the caller can skip it
- * safely (a device-targeted rule must never silently match everything).
+ * Resolves a src_device / dst_device reference to a list of IPs.
+ *   'any'          -> not device-constrained (ips: null, ok)
+ *   '<device-id>'  -> that device's IP
+ *   'tag:<name>'   -> every tagged device that has an IP (a group)
+ *
+ * `ok` is false when a device/group reference resolves to no usable IP, so the
+ * caller skips the rule — a device-targeted rule must never silently match
+ * everything.
  */
-function resolveRule(rule: FirewallPolicy, devices: Map<string, DeviceRef>): FirewallPolicy | null {
-  let src_ip = rule.src_ip;
-  let dst_ip = rule.dst_ip;
+function resolveRef(ref: string | undefined, devices: DeviceRef[]): { ips: string[] | null; ok: boolean } {
+  if (!ref || ref === 'any') return { ips: null, ok: true };
+  if (ref.startsWith('tag:')) {
+    const tag = ref.slice(4);
+    const ips = devices.filter(d => (d.tags || []).includes(tag) && d.ip_address).map(d => String(d.ip_address));
+    return { ips, ok: ips.length > 0 };
+  }
+  const dev = devices.find(d => d.id === ref);
+  return { ips: dev?.ip_address ? [String(dev.ip_address)] : [], ok: !!dev?.ip_address };
+}
 
-  if (rule.src_device && rule.src_device !== 'any') {
-    const ip = devices.get(rule.src_device)?.ip_address;
-    if (!ip) return null;
-    src_ip = ip;
-  }
-  if (rule.dst_device && rule.dst_device !== 'any') {
-    const ip = devices.get(rule.dst_device)?.ip_address;
-    if (!ip) return null;
-    dst_ip = ip;
-  }
-  return src_ip === rule.src_ip && dst_ip === rule.dst_ip ? rule : { ...rule, src_ip, dst_ip };
+/** Builds an nftables address match for one or more IPs (anonymous set if >1). */
+function addrExpr(dir: 'saddr' | 'daddr', ips: string[]): string {
+  const v4 = ips.filter(ip => !ip.includes(':'));
+  const v6 = ips.filter(ip => ip.includes(':'));
+  const fam = v4.length ? { p: 'ip', list: v4 } : { p: 'ip6', list: v6 };
+  if (!fam.list.length) return '';
+  return fam.list.length === 1
+    ? `${fam.p} ${dir} ${fam.list[0]}`
+    : `${fam.p} ${dir} { ${fam.list.join(', ')} }`;
 }
 
 /** L7 (App-ID / URL category) matches are enforced via DNS, not nftables/WFP. */
@@ -41,19 +45,20 @@ function isLayer7(rule: FirewallPolicy): boolean {
   return (!!rule.app_id && rule.app_id !== 'any') || (!!rule.url_category && rule.url_category !== 'any');
 }
 
-function emitNftRules(rules: FirewallPolicy[], devices: Map<string, DeviceRef>): string[] {
+function emitNftRules(rules: FirewallPolicy[], devices: DeviceRef[]): string[] {
   const out: string[] = [];
   for (const rule of rules) {
     if (isLayer7(rule)) {
       out.push(`    # "${rule.name}": App-ID/URL match enforced via DNS filtering`);
       continue;
     }
-    const resolved = resolveRule(rule, devices);
-    if (!resolved) {
-      out.push(`    # Skipped "${rule.name}": referenced device has no known IP yet`);
+    const s = resolveRef(rule.src_device, devices);
+    const d = resolveRef(rule.dst_device, devices);
+    if (!s.ok || !d.ok) {
+      out.push(`    # Skipped "${rule.name}": device/group has no member with a known IP yet`);
       continue;
     }
-    out.push(`    ${compileRule(resolved)}  # ${rule.name}`);
+    out.push(`    ${compileRule(rule, s.ips, d.ips)}  # ${rule.name}`);
   }
   return out;
 }
@@ -71,7 +76,6 @@ export function compileNftables(policies: FirewallPolicy[], devices: DeviceRef[]
   const enabled = policies
     .filter(p => p.enabled)
     .sort((a, b) => a.priority - b.priority);
-  const devMap = buildDeviceMap(devices);
 
   const lines: string[] = [
     '#!/usr/sbin/nft -f',
@@ -93,13 +97,13 @@ export function compileNftables(policies: FirewallPolicy[], devices: DeviceRef[]
     '    ct state invalid drop',
     '    # Essential ICMP/ICMPv6 (ping, path MTU, neighbor discovery)',
     '    meta l4proto { icmp, ipv6-icmp } accept',
-    ...emitNftRules(enabled.filter(r => r.direction === 'inbound'), devMap),
+    ...emitNftRules(enabled.filter(r => r.direction === 'inbound'), devices),
     '  }',
     '',
     '  # Output chain - outbound traffic from this host',
     '  chain output {',
     '    type filter hook output priority 0; policy accept;',
-    ...emitNftRules(enabled.filter(r => r.direction === 'outbound'), devMap),
+    ...emitNftRules(enabled.filter(r => r.direction === 'outbound'), devices),
     '  }',
     '',
     '  # Forward chain - transit traffic (gateway mode)',
@@ -107,7 +111,7 @@ export function compileNftables(policies: FirewallPolicy[], devices: DeviceRef[]
     '    type filter hook forward priority 0; policy drop;',
     '    ct state established,related accept',
     '    ct state invalid drop',
-    ...emitNftRules(enabled.filter(r => r.direction === 'forward'), devMap),
+    ...emitNftRules(enabled.filter(r => r.direction === 'forward'), devices),
     '  }',
     '',
     '  # NAT chain',
@@ -125,7 +129,9 @@ function isIpv6(value: string): boolean {
   return value.includes(':');
 }
 
-function compileRule(rule: FirewallPolicy): string {
+// srcIps / dstIps: resolved device/group IPs, or null when not device-constrained
+// (in which case the rule's own src_ip / dst_ip is used).
+function compileRule(rule: FirewallPolicy, srcIps: string[] | null, dstIps: string[] | null): string {
   const parts: string[] = [];
 
   if (rule.interface && rule.interface !== 'any') {
@@ -133,11 +139,17 @@ function compileRule(rule: FirewallPolicy): string {
     parts.push(`${hook} "${rule.interface}"`);
   }
 
-  if (rule.src_ip && rule.src_ip !== 'any') {
+  if (srcIps !== null) {
+    const e = addrExpr('saddr', srcIps);
+    if (e) parts.push(e);
+  } else if (rule.src_ip && rule.src_ip !== 'any') {
     parts.push(`${isIpv6(rule.src_ip) ? 'ip6' : 'ip'} saddr ${rule.src_ip}`);
   }
 
-  if (rule.dst_ip && rule.dst_ip !== 'any') {
+  if (dstIps !== null) {
+    const e = addrExpr('daddr', dstIps);
+    if (e) parts.push(e);
+  } else if (rule.dst_ip && rule.dst_ip !== 'any') {
     parts.push(`${isIpv6(rule.dst_ip) ? 'ip6' : 'ip'} daddr ${rule.dst_ip}`);
   }
 
@@ -198,7 +210,6 @@ export function compileWindowsFirewall(policies: FirewallPolicy[], devices: Devi
     .filter(p => p.enabled)
     .filter(p => p.direction !== 'forward')
     .sort((a, b) => a.priority - b.priority);
-  const devMap = buildDeviceMap(devices);
 
   const lines: string[] = [
     '# HomeShield NGFW - Windows Firewall Rules (PowerShell)',
@@ -210,18 +221,26 @@ export function compileWindowsFirewall(policies: FirewallPolicy[], devices: Devi
     '',
   ];
 
-  for (const original of enabled) {
-    if (original.action === 'log-only') {
-      lines.push(`# Skipped "${psEscape(original.name)}": log-only rules are not supported by Windows Firewall`, '');
+  // Resolves an address for a Windows -Remote/-LocalAddress parameter:
+  // a comma-separated list of resolved device/group IPs, or the rule's own IP.
+  const winAddr = (ips: string[] | null, fallback: string): string | null => {
+    if (ips !== null) return ips.length ? ips.join(',') : null;
+    return fallback && fallback !== 'any' ? fallback : null;
+  };
+
+  for (const rule of enabled) {
+    if (rule.action === 'log-only') {
+      lines.push(`# Skipped "${psEscape(rule.name)}": log-only rules are not supported by Windows Firewall`, '');
       continue;
     }
-    if (isLayer7(original)) {
-      lines.push(`# "${psEscape(original.name)}": App-ID/URL match enforced via DNS filtering`, '');
+    if (isLayer7(rule)) {
+      lines.push(`# "${psEscape(rule.name)}": App-ID/URL match enforced via DNS filtering`, '');
       continue;
     }
-    const rule = resolveRule(original, devMap);
-    if (!rule) {
-      lines.push(`# Skipped "${psEscape(original.name)}": referenced device has no known IP yet`, '');
+    const s = resolveRef(rule.src_device, devices);
+    const d = resolveRef(rule.dst_device, devices);
+    if (!s.ok || !d.ok) {
+      lines.push(`# Skipped "${psEscape(rule.name)}": device/group has no member with a known IP yet`, '');
       continue;
     }
 
@@ -235,10 +254,10 @@ export function compileWindowsFirewall(policies: FirewallPolicy[], devices: Devi
     cmd += `  -Direction ${dir} -Action ${action} -Protocol ${proto} \`\n`;
 
     // Inbound: remote = source, local = destination. Outbound: remote = destination.
-    const remoteIp = outbound ? rule.dst_ip : rule.src_ip;
-    const localIp = outbound ? rule.src_ip : rule.dst_ip;
-    if (remoteIp && remoteIp !== 'any') cmd += `  -RemoteAddress "${remoteIp}" \`\n`;
-    if (localIp && localIp !== 'any') cmd += `  -LocalAddress "${localIp}" \`\n`;
+    const remoteIp = outbound ? winAddr(d.ips, rule.dst_ip) : winAddr(s.ips, rule.src_ip);
+    const localIp = outbound ? winAddr(s.ips, rule.src_ip) : winAddr(d.ips, rule.dst_ip);
+    if (remoteIp) cmd += `  -RemoteAddress "${remoteIp}" \`\n`;
+    if (localIp) cmd += `  -LocalAddress "${localIp}" \`\n`;
 
     if (hasPorts) {
       const remotePort = outbound ? rule.dst_port : rule.src_port;
@@ -262,7 +281,6 @@ function psEscape(value: string): string {
 
 export function validatePolicies(policies: FirewallPolicy[], devices: DeviceRef[] = []): string[] {
   const errors: string[] = [];
-  const devMap = buildDeviceMap(devices);
 
   for (const p of policies) {
     if (!p.name.trim()) errors.push(`Rule ${p.id}: name is required`);
@@ -279,12 +297,18 @@ export function validatePolicies(policies: FirewallPolicy[], devices: DeviceRef[
       errors.push(`Rule "${p.name}": invalid destination IP "${p.dst_ip}"`);
     }
 
-    // Device-ID matches must reference a known, resolvable device.
-    for (const [field, value] of [['source', p.src_device], ['destination', p.dst_device]] as const) {
-      if (value && value !== 'any') {
-        const dev = devMap.get(value);
+    // Device / group matches must reference a known, resolvable target.
+    for (const [field, ref] of [['source', p.src_device], ['destination', p.dst_device]] as const) {
+      if (!ref || ref === 'any') continue;
+      if (ref.startsWith('tag:')) {
+        const tag = ref.slice(4);
+        const members = devices.filter(d => (d.tags || []).includes(tag));
+        if (!members.length) errors.push(`Rule "${p.name}": ${field} group "${tag}" has no enrolled devices`);
+        else if (!members.some(d => d.ip_address)) errors.push(`Rule "${p.name}": ${field} group "${tag}" has no member with a known IP yet`);
+      } else {
+        const dev = devices.find(d => d.id === ref);
         if (!dev) errors.push(`Rule "${p.name}": ${field} device is no longer enrolled`);
-        else if (!dev.ip_address) errors.push(`Rule "${p.name}": ${field} device "${dev.hostname || value}" has no known IP yet`);
+        else if (!dev.ip_address) errors.push(`Rule "${p.name}": ${field} device "${dev.hostname || ref}" has no known IP yet`);
       }
     }
 

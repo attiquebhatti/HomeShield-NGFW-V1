@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { RefreshCw, Trash2, Monitor, Server, Smartphone, HelpCircle, Download, Plus, AlertTriangle, Copy, Check } from 'lucide-react';
+import { RefreshCw, Trash2, Monitor, Server, Smartphone, HelpCircle, Download, Plus, AlertTriangle, Copy, Check, Tags } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { Card, CardHeader } from '../components/ui/Card';
@@ -15,6 +15,7 @@ interface Device {
   os_version: string;
   agent_version: string;
   ip_address: string;
+  tags: string[] | null;
   enrolled_at: string;
   last_seen: string;
   online: number | boolean;
@@ -35,6 +36,7 @@ export function Devices() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [tagsEdit, setTagsEdit] = useState<{ id: string; hostname: string; text: string } | null>(null);
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const [installOpen, setInstallOpen] = useState(false);
@@ -86,6 +88,14 @@ export function Devices() {
     fetchDevices();
   }
 
+  async function saveTags() {
+    if (!tagsEdit) return;
+    const tags = tagsEdit.text.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    await api.patch(`devices/${tagsEdit.id}`, { tags });
+    setTagsEdit(null);
+    fetchDevices();
+  }
+
   const online = devices.filter(d => d.online).length;
 
   return (
@@ -122,6 +132,7 @@ export function Devices() {
                 <th className="px-4 py-3 text-left font-medium">Device</th>
                 <th className="px-4 py-3 text-left font-medium">OS</th>
                 <th className="px-4 py-3 text-left font-medium">IP</th>
+                <th className="px-4 py-3 text-left font-medium">Groups</th>
                 <th className="px-4 py-3 text-left font-medium">Agent</th>
                 <th className="px-4 py-3 text-left font-medium">Last Seen</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
@@ -129,9 +140,9 @@ export function Devices() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={6} className="px-4 py-12 text-center text-text-muted">Loading...</td></tr>
+                <tr><td colSpan={7} className="px-4 py-12 text-center text-text-muted">Loading...</td></tr>
               ) : devices.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-12 text-center text-text-muted">No devices enrolled yet. Install an agent and point it at this server.</td></tr>
+                <tr><td colSpan={7} className="px-4 py-12 text-center text-text-muted">No devices enrolled yet. Install an agent and point it at this server.</td></tr>
               ) : devices.map(d => {
                 const Icon = osIcon[d.os] ?? HelpCircle;
                 return (
@@ -153,13 +164,27 @@ export function Devices() {
                       {d.os_version && <div className="text-xs text-text-muted/60 mt-0.5 max-w-44 truncate">{d.os_version}</div>}
                     </td>
                     <td className="px-4 py-3 font-mono text-text-secondary">{d.ip_address || '—'}</td>
+                    <td className="px-4 py-3">
+                      <button onClick={() => setTagsEdit({ id: d.id, hostname: d.hostname, text: (d.tags || []).join(', ') })}
+                        className="flex items-center gap-1 flex-wrap text-left group">
+                        {(d.tags && d.tags.length)
+                          ? d.tags.map(t => <Badge key={t} variant="info">{t}</Badge>)
+                          : <span className="text-xs text-text-muted/50 group-hover:text-brand-gold">+ add</span>}
+                      </button>
+                    </td>
                     <td className="px-4 py-3 text-text-muted">{d.agent_version || '—'}</td>
                     <td className="px-4 py-3 text-text-muted">{timeAgo(d.last_seen)}</td>
                     <td className="px-4 py-3 text-right">
-                      <button onClick={() => setDeleteId(d.id)} title="Remove device"
-                        className="p-1.5 rounded text-text-muted hover:text-danger hover:bg-danger/10 transition-colors">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button onClick={() => setTagsEdit({ id: d.id, hostname: d.hostname, text: (d.tags || []).join(', ') })} title="Edit groups"
+                          className="p-1.5 rounded text-text-muted hover:text-brand-gold hover:bg-brand-gold/10 transition-colors">
+                          <Tags className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => setDeleteId(d.id)} title="Remove device"
+                          className="p-1.5 rounded text-text-muted hover:text-danger hover:bg-danger/10 transition-colors">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -235,6 +260,22 @@ export function Devices() {
                 </div>
               </div>
             </details>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={!!tagsEdit} onClose={() => setTagsEdit(null)} title={`Groups — ${tagsEdit?.hostname ?? ''}`} size="sm">
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-text-muted mb-1">Groups / tags (comma-separated)</label>
+            <input className="w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-brand-gold/50"
+              value={tagsEdit?.text ?? ''} autoFocus placeholder="iot, kids, corporate"
+              onChange={e => setTagsEdit(t => t && { ...t, text: e.target.value })} />
+            <p className="text-xs text-text-muted/60 mt-1">Lowercase letters, numbers, - and _. Policies can target a group as <code className="font-mono">tag:&lt;name&gt;</code> to match every device in it.</p>
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setTagsEdit(null)}>Cancel</Button>
+            <Button variant="primary" onClick={saveTags}>Save Groups</Button>
           </div>
         </div>
       </Modal>

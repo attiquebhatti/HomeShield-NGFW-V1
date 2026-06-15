@@ -1022,6 +1022,20 @@ api.get('/devices', async (_req, res) => {
   }
 });
 
+// Set a device's tags (group membership). Admin-authored; the agent's
+// heartbeat upsert never touches the tags column, so these are preserved.
+api.patch('/devices/:id', async (req, res) => {
+  try {
+    const tags = Array.isArray(req.body?.tags)
+      ? [...new Set(req.body.tags.map(t => String(t).trim().toLowerCase()).filter(t => /^[a-z0-9_-]{1,32}$/.test(t)))]
+      : [];
+    await query('UPDATE devices SET tags = ? WHERE id = ?', [JSON.stringify(tags), req.params.id]);
+    res.json({ data: { id: req.params.id, tags } });
+  } catch (e) {
+    serverError(res, 'devices update', e);
+  }
+});
+
 api.delete('/devices/:id', async (req, res) => {
   try {
     await query('DELETE FROM devices WHERE id = ?', [req.params.id]);

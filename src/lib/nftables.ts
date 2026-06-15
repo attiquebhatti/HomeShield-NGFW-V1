@@ -36,9 +36,18 @@ function resolveRule(rule: FirewallPolicy, devices: Map<string, DeviceRef>): Fir
   return src_ip === rule.src_ip && dst_ip === rule.dst_ip ? rule : { ...rule, src_ip, dst_ip };
 }
 
+/** L7 (App-ID / URL category) matches are enforced via DNS, not nftables/WFP. */
+function isLayer7(rule: FirewallPolicy): boolean {
+  return (!!rule.app_id && rule.app_id !== 'any') || (!!rule.url_category && rule.url_category !== 'any');
+}
+
 function emitNftRules(rules: FirewallPolicy[], devices: Map<string, DeviceRef>): string[] {
   const out: string[] = [];
   for (const rule of rules) {
+    if (isLayer7(rule)) {
+      out.push(`    # "${rule.name}": App-ID/URL match enforced via DNS filtering`);
+      continue;
+    }
     const resolved = resolveRule(rule, devices);
     if (!resolved) {
       out.push(`    # Skipped "${rule.name}": referenced device has no known IP yet`);
@@ -204,6 +213,10 @@ export function compileWindowsFirewall(policies: FirewallPolicy[], devices: Devi
   for (const original of enabled) {
     if (original.action === 'log-only') {
       lines.push(`# Skipped "${psEscape(original.name)}": log-only rules are not supported by Windows Firewall`, '');
+      continue;
+    }
+    if (isLayer7(original)) {
+      lines.push(`# "${psEscape(original.name)}": App-ID/URL match enforced via DNS filtering`, '');
       continue;
     }
     const rule = resolveRule(original, devMap);

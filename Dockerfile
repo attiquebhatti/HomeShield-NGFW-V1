@@ -15,7 +15,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # Server entrypoint + its pure ESM modules and the SQL schema.
-COPY server.js feeds.mjs wireguard.mjs backup.mjs totp.mjs metrics.mjs ipsec.mjs bootstrap.mjs google.mjs ./
+COPY server.js feeds.mjs wireguard.mjs backup.mjs totp.mjs metrics.mjs ipsec.mjs bootstrap.mjs google.mjs appsignatures.mjs ./
 COPY api ./api
 # Windows agent script is served as a download by the console.
 COPY agent-windows ./agent-windows

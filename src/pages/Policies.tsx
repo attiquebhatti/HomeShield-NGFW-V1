@@ -35,6 +35,9 @@ const emptyPolicy: Omit<FirewallPolicy, 'id' | 'created_at' | 'updated_at'> = {
   dst_ip: 'any',
   src_device: 'any',
   dst_device: 'any',
+  app_id: 'any',
+  url_category: 'any',
+  content_profile: 'none',
   src_port: 'any',
   dst_port: 'any',
   protocol: 'any',
@@ -46,6 +49,7 @@ const emptyPolicy: Omit<FirewallPolicy, 'id' | 'created_at' | 'updated_at'> = {
 };
 
 interface DeviceOption { id: string; hostname: string; ip_address: string; os?: string; }
+interface AppCatalog { applications: string[]; categories: string[]; }
 
 type ApplyStatus = 'idle' | 'validating' | 'previewing' | 'applying' | 'confirming' | 'rolled_back' | 'confirmed';
 
@@ -61,7 +65,7 @@ interface ApplyState {
 const ROLLBACK_SECONDS = 30;
 
 function PolicyForm({
-  value, onChange, onSubmit, onCancel, loading, isEdit, devices,
+  value, onChange, onSubmit, onCancel, loading, isEdit, devices, catalog,
 }: {
   value: typeof emptyPolicy;
   onChange: (p: typeof emptyPolicy) => void;
@@ -70,7 +74,9 @@ function PolicyForm({
   loading: boolean;
   isEdit: boolean;
   devices: DeviceOption[];
+  catalog: AppCatalog;
 }) {
+  const isL7 = value.app_id !== 'any' || value.url_category !== 'any';
   const set = (key: string, val: unknown) => onChange({ ...value, [key]: val });
   const i = 'w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-brand-gold/50 focus:ring-1 focus:ring-brand-gold/20 transition-all';
   const l = 'block text-xs font-medium text-text-muted mb-1';
@@ -159,6 +165,45 @@ function PolicyForm({
           <input className={i} value={value.tags.join(', ')} onChange={e => set('tags', e.target.value.split(',').map((t: string) => t.trim()).filter(Boolean))} placeholder="web, security" />
         </div>
       </div>
+
+      {/* Layer-7 match criteria (App-ID, URL filtering, Content-ID) */}
+      <div className="pt-2 border-t border-border-muted">
+        <div className="text-xs font-semibold text-text-secondary mb-2">Application Layer (L7)</div>
+        <div className="grid grid-cols-3 gap-4">
+          <div>
+            <label className={l}>Application (App-ID)</label>
+            <select className={i} value={value.app_id} onChange={e => set('app_id', e.target.value)}>
+              <option value="any">Any</option>
+              {catalog.applications.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={l}>URL Category</label>
+            <select className={i} value={value.url_category} onChange={e => set('url_category', e.target.value)}>
+              <option value="any">Any</option>
+              {catalog.categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={l}>Content Inspection</label>
+            <select className={i} value={value.content_profile} onChange={e => set('content_profile', e.target.value)}>
+              <option value="none">None</option>
+              <option value="ips">IPS (Suricata)</option>
+            </select>
+          </div>
+        </div>
+        {isL7 && (
+          <p className="text-xs text-text-muted/70 mt-2">
+            App-ID / URL matches are enforced at the <strong>DNS layer</strong> (the app's domains are
+            {value.action === 'allow' ? ' allow-listed' : ' sinkholed'}). DNS Filtering must be enabled. L3/L4 fields are ignored for this rule.
+          </p>
+        )}
+        {value.content_profile !== 'none' && (
+          <p className="text-xs text-text-muted/70 mt-1">
+            Content inspection routes to the global Suricata engine — enable IPS mode under IDS / IPS.
+          </p>
+        )}
+      </div>
       <div className="flex items-center gap-4 pt-1">
         <label className="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" className="w-4 h-4 accent-brand-gold" checked={value.enabled} onChange={e => set('enabled', e.target.checked)} />
@@ -220,6 +265,7 @@ function RollbackBanner({
 export function Policies() {
   const [policies, setPolicies] = useState<FirewallPolicy[]>([]);
   const [devices, setDevices] = useState<DeviceOption[]>([]);
+  const [catalog, setCatalog] = useState<AppCatalog>({ applications: [], categories: [] });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -255,7 +301,12 @@ export function Policies() {
     setDevices(data ?? []);
   }
 
-  useEffect(() => { fetchPolicies(); fetchDevices(); }, []);
+  async function fetchCatalog() {
+    const { data } = await api.get<AppCatalog>('app-catalog');
+    if (data) setCatalog(data);
+  }
+
+  useEffect(() => { fetchPolicies(); fetchDevices(); fetchCatalog(); }, []);
   useEffect(() => () => { if (countdownRef.current) clearInterval(countdownRef.current); }, []);
 
   const deviceName = (id: string) => devices.find(d => d.id === id)?.hostname || `${id.slice(0, 8)}…`;
@@ -533,7 +584,11 @@ export function Policies() {
                       <Badge variant={directionVariant[policy.direction] ?? 'neutral'}>{policy.direction}</Badge>
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-text-secondary">
-                      {policy.src_device && policy.src_device !== 'any'
+                      {policy.app_id && policy.app_id !== 'any'
+                        ? <Badge variant="warning">App: {policy.app_id}</Badge>
+                        : policy.url_category && policy.url_category !== 'any'
+                        ? <Badge variant="warning">URL: {policy.url_category}</Badge>
+                        : policy.src_device && policy.src_device !== 'any'
                         ? <Badge variant="info">{deviceName(policy.src_device)}</Badge>
                         : <div>{policy.src_ip}</div>}
                       {policy.src_port !== 'any' && <div className="text-text-muted">:{policy.src_port}</div>}
@@ -621,6 +676,7 @@ export function Policies() {
             loading={saving}
             isEdit={!!editTarget}
             devices={devices}
+            catalog={catalog}
           />
         </Modal>
 

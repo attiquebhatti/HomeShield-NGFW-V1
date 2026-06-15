@@ -14,6 +14,9 @@ function policy(overrides: Partial<FirewallPolicy> = {}): FirewallPolicy {
     dst_ip: 'any',
     src_device: 'any',
     dst_device: 'any',
+    app_id: 'any',
+    url_category: 'any',
+    content_profile: 'none',
     src_port: 'any',
     dst_port: 'any',
     protocol: 'any',
@@ -172,6 +175,25 @@ describe('device-ID matching', () => {
     expect(validatePolicies([policy({ src_device: 'dev-1' })], devices)).toEqual([]);
     expect(validatePolicies([policy({ src_device: 'dev-404' })], devices)[0]).toMatch(/no longer enrolled/);
     expect(validatePolicies([policy({ dst_device: 'dev-2' })], devices)[0]).toMatch(/no known IP/);
+  });
+});
+
+describe('App-ID / URL (L7) matches', () => {
+  it('does not emit an nftables IP rule for an app-match policy', () => {
+    const out = compileNftables([policy({ name: 'NoYouTube', app_id: 'YouTube', action: 'deny' })]);
+    expect(out).toContain('# "NoYouTube": App-ID/URL match enforced via DNS filtering');
+    expect(out).not.toContain('counter drop  # NoYouTube');
+  });
+
+  it('does not emit a Windows rule for a url-category policy', () => {
+    const out = compileWindowsFirewall([policy({ name: 'NoSocial', url_category: 'social', action: 'deny' })]);
+    expect(out).toContain('App-ID/URL match enforced via DNS filtering');
+    expect(out).not.toContain('New-NetFirewallRule -DisplayName "HomeShield-NoSocial"');
+  });
+
+  it('still compiles normal L3/L4 rules without app/url set', () => {
+    const out = compileNftables([policy({ name: 'SSH', protocol: 'tcp', dst_port: '22', action: 'allow' })]);
+    expect(out).toContain('tcp dport 22');
   });
 });
 

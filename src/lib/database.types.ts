@@ -93,6 +93,9 @@ export interface FirewallPolicy {
   dst_ip: string;
   src_device: string;
   dst_device: string;
+  app_id: string;
+  url_category: string;
+  content_profile: string;
   src_port: string;
   dst_port: string;
   protocol: 'tcp' | 'udp' | 'icmp' | 'any';

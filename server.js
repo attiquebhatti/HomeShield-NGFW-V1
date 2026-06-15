@@ -14,6 +14,7 @@ import { renderPrometheus, groupSamples } from './metrics.mjs';
 import { buildWindowsInstaller } from './ipsec.mjs';
 import { buildWindowsBootstrap, buildWindowsCmd } from './bootstrap.mjs';
 import { verifyGoogleIdToken } from './google.mjs';
+import { listApplications, listCategories, appDomains, categoryDomains } from './appsignatures.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -622,7 +623,7 @@ const BOOL_FIELDS = {
 // A resource missing from UPDATABLE_COLS cannot be updated at all.
 
 const INSERTABLE_COLS = {
-  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_device', 'dst_device', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
+  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_device', 'dst_device', 'app_id', 'url_category', 'content_profile', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
   'firewall-logs': ['timestamp', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'policy_id', 'policy_name', 'bytes', 'packets', 'note'],
   'dns-entries': ['domain', 'list_type', 'category', 'source', 'enabled', 'note'],
   'dns-logs': ['timestamp', 'domain', 'client_ip', 'action', 'matched_list', 'category', 'response_ip', 'query_type'],
@@ -640,7 +641,7 @@ const INSERTABLE_COLS = {
 };
 
 const UPDATABLE_COLS = {
-  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_device', 'dst_device', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
+  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_device', 'dst_device', 'app_id', 'url_category', 'content_profile', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
   'dns-entries': ['domain', 'list_type', 'category', 'source', 'enabled', 'note'],
   'ids-alerts': ['acknowledged'],
   'threat-feeds': ['name', 'description', 'url', 'feed_type', 'enabled', 'last_updated', 'last_status', 'indicator_count', 'refresh_interval_hours'],
@@ -1028,6 +1029,11 @@ api.delete('/devices/:id', async (req, res) => {
   } catch (e) {
     serverError(res, 'devices delete', e);
   }
+});
+
+// Application / URL-category catalog for the policy editor (App-ID, URL filter).
+api.get('/app-catalog', (_req, res) => {
+  res.json({ data: { applications: listApplications(), categories: listCategories() } });
 });
 
 // ─── WireGuard VPN ───────────────────────────────────────────────────────
@@ -1488,12 +1494,32 @@ agent.get('/dns-config', async (_req, res) => {
          AND (ti.expires_at IS NULL OR ti.expires_at > NOW())
        LIMIT 200000`
     );
+
+    // App-ID / URL-category enforcement: enabled policies that match an
+    // application or content category are enforced at the DNS layer by
+    // expanding them to their domains. deny/reject -> blocklist, allow ->
+    // allowlist (which wins via the matcher's allowlist precedence).
+    const l7 = await query(
+      "SELECT name, action, app_id, url_category FROM firewall_policies WHERE enabled = 1 AND (app_id <> 'any' OR url_category <> 'any')"
+    );
+    const l7Entries = [];
+    for (const p of l7) {
+      const listType = p.action === 'allow' ? 'allowlist' : 'blocklist';
+      const domains = [
+        ...(p.app_id && p.app_id !== 'any' ? appDomains(p.app_id) : []),
+        ...(p.url_category && p.url_category !== 'any' ? categoryDomains(p.url_category) : []),
+      ];
+      for (const domain of domains) {
+        l7Entries.push({ domain, list_type: listType, category: `policy:${p.name}` });
+      }
+    }
+
     res.json({
       data: {
         enabled: map.dns_filtering_enabled === 'true',
         upstream: map.dns_upstream || '1.1.1.1',
         appid_enabled: map.appid_enabled !== 'false',
-        entries: [...castRows(entries), ...castRows(threatDomains)],
+        entries: [...castRows(entries), ...castRows(threatDomains), ...l7Entries],
       },
     });
   } catch (e) {
@@ -1944,6 +1970,15 @@ async function ensurePolicyColumns() {
     }
     if (!have.has('dst_device')) {
       await getPool().query("ALTER TABLE firewall_policies ADD COLUMN dst_device VARCHAR(36) DEFAULT 'any' AFTER src_device");
+    }
+    if (!have.has('app_id')) {
+      await getPool().query("ALTER TABLE firewall_policies ADD COLUMN app_id VARCHAR(100) DEFAULT 'any' AFTER dst_device");
+    }
+    if (!have.has('url_category')) {
+      await getPool().query("ALTER TABLE firewall_policies ADD COLUMN url_category VARCHAR(100) DEFAULT 'any' AFTER app_id");
+    }
+    if (!have.has('content_profile')) {
+      await getPool().query("ALTER TABLE firewall_policies ADD COLUMN content_profile VARCHAR(20) DEFAULT 'none' AFTER url_category");
     }
   } catch (e) {
     console.error('ensurePolicyColumns failed:', e.message);

@@ -622,7 +622,7 @@ const BOOL_FIELDS = {
 // A resource missing from UPDATABLE_COLS cannot be updated at all.
 
 const INSERTABLE_COLS = {
-  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
+  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_device', 'dst_device', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
   'firewall-logs': ['timestamp', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'policy_id', 'policy_name', 'bytes', 'packets', 'note'],
   'dns-entries': ['domain', 'list_type', 'category', 'source', 'enabled', 'note'],
   'dns-logs': ['timestamp', 'domain', 'client_ip', 'action', 'matched_list', 'category', 'response_ip', 'query_type'],
@@ -640,7 +640,7 @@ const INSERTABLE_COLS = {
 };
 
 const UPDATABLE_COLS = {
-  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
+  'firewall-policies': ['name', 'description', 'enabled', 'action', 'direction', 'src_ip', 'dst_ip', 'src_device', 'dst_device', 'src_port', 'dst_port', 'protocol', 'interface', 'schedule', 'tags', 'priority', 'log_enabled', 'updated_at'],
   'dns-entries': ['domain', 'list_type', 'category', 'source', 'enabled', 'note'],
   'ids-alerts': ['acknowledged'],
   'threat-feeds': ['name', 'description', 'url', 'feed_type', 'enabled', 'last_updated', 'last_status', 'indicator_count', 'refresh_interval_hours'],
@@ -1931,6 +1931,25 @@ async function loadAgentToken() {
   }
 }
 
+// Adds device-ID match columns to firewall_policies on existing databases.
+async function ensurePolicyColumns() {
+  try {
+    const [cols] = await getPool().query(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
+      [process.env.DB_NAME, 'firewall_policies']
+    );
+    const have = new Set(cols.map(c => c.column_name || c.COLUMN_NAME));
+    if (!have.has('src_device')) {
+      await getPool().query("ALTER TABLE firewall_policies ADD COLUMN src_device VARCHAR(36) DEFAULT 'any' AFTER dst_ip");
+    }
+    if (!have.has('dst_device')) {
+      await getPool().query("ALTER TABLE firewall_policies ADD COLUMN dst_device VARCHAR(36) DEFAULT 'any' AFTER src_device");
+    }
+  } catch (e) {
+    console.error('ensurePolicyColumns failed:', e.message);
+  }
+}
+
 // Adds RBAC/MFA columns to admin_users on existing databases. Idempotent.
 async function ensureUserColumns() {
   try {
@@ -2127,6 +2146,7 @@ async function refreshDueFeeds() {
 autoMigrate().then(async () => {
   await ensureVpnTables();
   await ensureUserColumns();
+  await ensurePolicyColumns();
   await ensureDefaultSettings();
   await loadAgentToken();
   pruneOldLogs();

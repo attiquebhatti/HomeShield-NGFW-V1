@@ -12,6 +12,8 @@ function policy(overrides: Partial<FirewallPolicy> = {}): FirewallPolicy {
     direction: 'inbound',
     src_ip: 'any',
     dst_ip: 'any',
+    src_device: 'any',
+    dst_device: 'any',
     src_port: 'any',
     dst_port: 'any',
     protocol: 'any',
@@ -131,6 +133,45 @@ describe('compileWindowsFirewall', () => {
   it('cleans up old rules without failing when none exist', () => {
     const out = compileWindowsFirewall([policy()]);
     expect(out).toContain('-ErrorAction SilentlyContinue');
+  });
+});
+
+describe('device-ID matching', () => {
+  const devices = [
+    { id: 'dev-1', hostname: 'attiques-laptop', ip_address: '192.168.1.50' },
+    { id: 'dev-2', hostname: 'no-ip-device', ip_address: null },
+  ];
+
+  it('resolves a source device to its IP in nftables', () => {
+    const out = compileNftables([policy({ src_device: 'dev-1', protocol: 'tcp', dst_port: '443' })], devices);
+    expect(out).toContain('ip saddr 192.168.1.50');
+  });
+
+  it('resolves a destination device to its IP', () => {
+    const out = compileNftables([policy({ direction: 'outbound', dst_device: 'dev-1' })], devices);
+    expect(out).toContain('ip daddr 192.168.1.50');
+  });
+
+  it('skips a rule whose device has no known IP (never matches everything)', () => {
+    const out = compileNftables([policy({ name: 'NoIP', src_device: 'dev-2' })], devices);
+    expect(out).toContain('# Skipped "NoIP": referenced device has no known IP yet');
+    expect(out).not.toContain('ip saddr');
+  });
+
+  it('skips a rule referencing an unknown device', () => {
+    const out = compileNftables([policy({ name: 'Gone', dst_device: 'dev-404' })], devices);
+    expect(out).toContain('# Skipped "Gone"');
+  });
+
+  it('resolves device to RemoteAddress for inbound Windows rules', () => {
+    const out = compileWindowsFirewall([policy({ src_device: 'dev-1', direction: 'inbound' })], devices);
+    expect(out).toContain('-RemoteAddress "192.168.1.50"');
+  });
+
+  it('validates device references', () => {
+    expect(validatePolicies([policy({ src_device: 'dev-1' })], devices)).toEqual([]);
+    expect(validatePolicies([policy({ src_device: 'dev-404' })], devices)[0]).toMatch(/no longer enrolled/);
+    expect(validatePolicies([policy({ dst_device: 'dev-2' })], devices)[0]).toMatch(/no known IP/);
   });
 });
 

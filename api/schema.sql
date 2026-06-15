@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS firewall_policies (
   direction ENUM('inbound','outbound','forward') NOT NULL DEFAULT 'inbound',
   src_ip VARCHAR(100) DEFAULT 'any',
   dst_ip VARCHAR(100) DEFAULT 'any',
+  src_device VARCHAR(36) DEFAULT 'any',
+  dst_device VARCHAR(36) DEFAULT 'any',
   src_port VARCHAR(100) DEFAULT 'any',
   dst_port VARCHAR(100) DEFAULT 'any',
   protocol ENUM('tcp','udp','icmp','any') DEFAULT 'any',

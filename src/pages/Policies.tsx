@@ -33,6 +33,8 @@ const emptyPolicy: Omit<FirewallPolicy, 'id' | 'created_at' | 'updated_at'> = {
   direction: 'inbound',
   src_ip: 'any',
   dst_ip: 'any',
+  src_device: 'any',
+  dst_device: 'any',
   src_port: 'any',
   dst_port: 'any',
   protocol: 'any',
@@ -42,6 +44,8 @@ const emptyPolicy: Omit<FirewallPolicy, 'id' | 'created_at' | 'updated_at'> = {
   priority: 100,
   log_enabled: true,
 };
+
+interface DeviceOption { id: string; hostname: string; ip_address: string; os?: string; }
 
 type ApplyStatus = 'idle' | 'validating' | 'previewing' | 'applying' | 'confirming' | 'rolled_back' | 'confirmed';
 
@@ -57,7 +61,7 @@ interface ApplyState {
 const ROLLBACK_SECONDS = 30;
 
 function PolicyForm({
-  value, onChange, onSubmit, onCancel, loading, isEdit,
+  value, onChange, onSubmit, onCancel, loading, isEdit, devices,
 }: {
   value: typeof emptyPolicy;
   onChange: (p: typeof emptyPolicy) => void;
@@ -65,6 +69,7 @@ function PolicyForm({
   onCancel: () => void;
   loading: boolean;
   isEdit: boolean;
+  devices: DeviceOption[];
 }) {
   const set = (key: string, val: unknown) => onChange({ ...value, [key]: val });
   const i = 'w-full bg-brand-panel border border-border-muted rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-muted focus:outline-none focus:border-brand-gold/50 focus:ring-1 focus:ring-brand-gold/20 transition-all';
@@ -99,12 +104,30 @@ function PolicyForm({
           </select>
         </div>
         <div>
+          <label className={l}>Source Device</label>
+          <select className={i} value={value.src_device} onChange={e => set('src_device', e.target.value)}>
+            <option value="any">Any (use IP/CIDR)</option>
+            {devices.map(d => <option key={d.id} value={d.id}>{d.hostname || d.id.slice(0, 8)} ({d.ip_address || 'no IP'})</option>)}
+          </select>
+        </div>
+        <div>
+          <label className={l}>Destination Device</label>
+          <select className={i} value={value.dst_device} onChange={e => set('dst_device', e.target.value)}>
+            <option value="any">Any (use IP/CIDR)</option>
+            {devices.map(d => <option key={d.id} value={d.id}>{d.hostname || d.id.slice(0, 8)} ({d.ip_address || 'no IP'})</option>)}
+          </select>
+        </div>
+        <div>
           <label className={l}>Source IP / CIDR</label>
-          <input className={i} value={value.src_ip} onChange={e => set('src_ip', e.target.value)} placeholder="any or 192.168.1.0/24" />
+          <input className={i} value={value.src_ip} disabled={value.src_device !== 'any'}
+            onChange={e => set('src_ip', e.target.value)} placeholder="any or 192.168.1.0/24" />
+          {value.src_device !== 'any' && <p className="text-xs text-text-muted/60 mt-1">Resolved from the source device</p>}
         </div>
         <div>
           <label className={l}>Destination IP / CIDR</label>
-          <input className={i} value={value.dst_ip} onChange={e => set('dst_ip', e.target.value)} placeholder="any" />
+          <input className={i} value={value.dst_ip} disabled={value.dst_device !== 'any'}
+            onChange={e => set('dst_ip', e.target.value)} placeholder="any" />
+          {value.dst_device !== 'any' && <p className="text-xs text-text-muted/60 mt-1">Resolved from the destination device</p>}
         </div>
         <div>
           <label className={l}>Source Port</label>
@@ -196,6 +219,7 @@ function RollbackBanner({
 
 export function Policies() {
   const [policies, setPolicies] = useState<FirewallPolicy[]>([]);
+  const [devices, setDevices] = useState<DeviceOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -226,8 +250,15 @@ export function Policies() {
     setLoading(false);
   }
 
-  useEffect(() => { fetchPolicies(); }, []);
+  async function fetchDevices() {
+    const { data } = await api.get<DeviceOption[]>('devices');
+    setDevices(data ?? []);
+  }
+
+  useEffect(() => { fetchPolicies(); fetchDevices(); }, []);
   useEffect(() => () => { if (countdownRef.current) clearInterval(countdownRef.current); }, []);
+
+  const deviceName = (id: string) => devices.find(d => d.id === id)?.hostname || `${id.slice(0, 8)}…`;
 
   function openCreate() {
     setEditTarget(null);
@@ -268,14 +299,14 @@ export function Policies() {
 
   async function handleApply(osTarget: 'linux' | 'windows') {
     setApplyState(s => ({ ...s, status: 'validating', osTarget, validationErrors: [] }));
-    const errors = validatePolicies(policies.filter(p => p.enabled));
+    const errors = validatePolicies(policies.filter(p => p.enabled), devices);
     if (errors.length > 0) {
       setApplyState(s => ({ ...s, status: 'idle', validationErrors: errors }));
       return;
     }
     const compiled = osTarget === 'linux'
-      ? compileNftables(policies)
-      : compileWindowsFirewall(policies);
+      ? compileNftables(policies, devices)
+      : compileWindowsFirewall(policies, devices);
     setApplyState(s => ({ ...s, status: 'previewing', compiledOutput: compiled }));
   }
 
@@ -502,11 +533,15 @@ export function Policies() {
                       <Badge variant={directionVariant[policy.direction] ?? 'neutral'}>{policy.direction}</Badge>
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-text-secondary">
-                      <div>{policy.src_ip}</div>
+                      {policy.src_device && policy.src_device !== 'any'
+                        ? <Badge variant="info">{deviceName(policy.src_device)}</Badge>
+                        : <div>{policy.src_ip}</div>}
                       {policy.src_port !== 'any' && <div className="text-text-muted">:{policy.src_port}</div>}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-text-secondary">
-                      <div>{policy.dst_ip}</div>
+                      {policy.dst_device && policy.dst_device !== 'any'
+                        ? <Badge variant="info">{deviceName(policy.dst_device)}</Badge>
+                        : <div>{policy.dst_ip}</div>}
                       {policy.dst_port !== 'any' && <div className="text-text-muted">:{policy.dst_port}</div>}
                     </td>
                     <td className="px-4 py-3 text-xs text-text-muted uppercase">{policy.protocol}</td>
@@ -568,8 +603,8 @@ export function Policies() {
               <div className="bg-brand-main rounded-b-xl overflow-x-auto">
                 <pre className="p-5 text-xs font-mono text-brand-gold/80 leading-relaxed whitespace-pre overflow-x-auto max-h-96">
                   {applyState.osTarget === 'linux'
-                    ? compileNftables(policies)
-                    : compileWindowsFirewall(policies)
+                    ? compileNftables(policies, devices)
+                    : compileWindowsFirewall(policies, devices)
                   }
                 </pre>
               </div>
@@ -585,6 +620,7 @@ export function Policies() {
             onCancel={() => setModalOpen(false)}
             loading={saving}
             isEdit={!!editTarget}
+            devices={devices}
           />
         </Modal>
 

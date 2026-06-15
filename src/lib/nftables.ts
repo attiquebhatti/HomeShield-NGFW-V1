@@ -1,5 +1,54 @@
 import type { FirewallPolicy } from './database.types';
 
+/** Minimal device shape used to resolve device-ID matches to IP addresses. */
+export interface DeviceRef {
+  id: string;
+  hostname?: string;
+  ip_address?: string | null;
+}
+
+function buildDeviceMap(devices: DeviceRef[] = []): Map<string, DeviceRef> {
+  const map = new Map<string, DeviceRef>();
+  for (const d of devices) map.set(d.id, d);
+  return map;
+}
+
+/**
+ * Resolves a policy's device-ID matches (src_device / dst_device) into the
+ * referenced device's current IP, returning an effective rule. Returns null if
+ * a referenced device is unknown or has no IP, so the caller can skip it
+ * safely (a device-targeted rule must never silently match everything).
+ */
+function resolveRule(rule: FirewallPolicy, devices: Map<string, DeviceRef>): FirewallPolicy | null {
+  let src_ip = rule.src_ip;
+  let dst_ip = rule.dst_ip;
+
+  if (rule.src_device && rule.src_device !== 'any') {
+    const ip = devices.get(rule.src_device)?.ip_address;
+    if (!ip) return null;
+    src_ip = ip;
+  }
+  if (rule.dst_device && rule.dst_device !== 'any') {
+    const ip = devices.get(rule.dst_device)?.ip_address;
+    if (!ip) return null;
+    dst_ip = ip;
+  }
+  return src_ip === rule.src_ip && dst_ip === rule.dst_ip ? rule : { ...rule, src_ip, dst_ip };
+}
+
+function emitNftRules(rules: FirewallPolicy[], devices: Map<string, DeviceRef>): string[] {
+  const out: string[] = [];
+  for (const rule of rules) {
+    const resolved = resolveRule(rule, devices);
+    if (!resolved) {
+      out.push(`    # Skipped "${rule.name}": referenced device has no known IP yet`);
+      continue;
+    }
+    out.push(`    ${compileRule(resolved)}  # ${rule.name}`);
+  }
+  return out;
+}
+
 /**
  * Compiles firewall policies into an nftables ruleset.
  *
@@ -7,11 +56,13 @@ import type { FirewallPolicy } from './database.types';
  * - Only touches `table inet homeshield` — never flushes the global ruleset,
  *   so rules from Docker, libvirt, fail2ban etc. are preserved.
  * - The whole script is applied atomically by `nft -f`.
+ * - Device-ID matches are resolved against `devices` at compile time.
  */
-export function compileNftables(policies: FirewallPolicy[]): string {
+export function compileNftables(policies: FirewallPolicy[], devices: DeviceRef[] = []): string {
   const enabled = policies
     .filter(p => p.enabled)
     .sort((a, b) => a.priority - b.priority);
+  const devMap = buildDeviceMap(devices);
 
   const lines: string[] = [
     '#!/usr/sbin/nft -f',
@@ -33,25 +84,13 @@ export function compileNftables(policies: FirewallPolicy[]): string {
     '    ct state invalid drop',
     '    # Essential ICMP/ICMPv6 (ping, path MTU, neighbor discovery)',
     '    meta l4proto { icmp, ipv6-icmp } accept',
-  ];
-
-  for (const rule of enabled.filter(r => r.direction === 'inbound')) {
-    lines.push(`    ${compileRule(rule)}  # ${rule.name}`);
-  }
-
-  lines.push(
+    ...emitNftRules(enabled.filter(r => r.direction === 'inbound'), devMap),
     '  }',
     '',
     '  # Output chain - outbound traffic from this host',
     '  chain output {',
     '    type filter hook output priority 0; policy accept;',
-  );
-
-  for (const rule of enabled.filter(r => r.direction === 'outbound')) {
-    lines.push(`    ${compileRule(rule)}  # ${rule.name}`);
-  }
-
-  lines.push(
+    ...emitNftRules(enabled.filter(r => r.direction === 'outbound'), devMap),
     '  }',
     '',
     '  # Forward chain - transit traffic (gateway mode)',
@@ -59,13 +98,7 @@ export function compileNftables(policies: FirewallPolicy[]): string {
     '    type filter hook forward priority 0; policy drop;',
     '    ct state established,related accept',
     '    ct state invalid drop',
-  );
-
-  for (const rule of enabled.filter(r => r.direction === 'forward')) {
-    lines.push(`    ${compileRule(rule)}  # ${rule.name}`);
-  }
-
-  lines.push(
+    ...emitNftRules(enabled.filter(r => r.direction === 'forward'), devMap),
     '  }',
     '',
     '  # NAT chain',
@@ -74,7 +107,7 @@ export function compileNftables(policies: FirewallPolicy[]): string {
     '  }',
     '',
     '}',
-  );
+  ];
 
   return lines.join('\n');
 }
@@ -149,12 +182,14 @@ function actionToVerdict(rule: FirewallPolicy): string {
  *   reject is mapped to Block; log-only rules are skipped with a comment.
  * - Port parameters are only valid for TCP/UDP, and remote vs local
  *   address/port mapping depends on rule direction.
+ * - Device-ID matches are resolved against `devices` at compile time.
  */
-export function compileWindowsFirewall(policies: FirewallPolicy[]): string {
+export function compileWindowsFirewall(policies: FirewallPolicy[], devices: DeviceRef[] = []): string {
   const enabled = policies
     .filter(p => p.enabled)
     .filter(p => p.direction !== 'forward')
     .sort((a, b) => a.priority - b.priority);
+  const devMap = buildDeviceMap(devices);
 
   const lines: string[] = [
     '# HomeShield NGFW - Windows Firewall Rules (PowerShell)',
@@ -166,9 +201,14 @@ export function compileWindowsFirewall(policies: FirewallPolicy[]): string {
     '',
   ];
 
-  for (const rule of enabled) {
-    if (rule.action === 'log-only') {
-      lines.push(`# Skipped "${psEscape(rule.name)}": log-only rules are not supported by Windows Firewall`, '');
+  for (const original of enabled) {
+    if (original.action === 'log-only') {
+      lines.push(`# Skipped "${psEscape(original.name)}": log-only rules are not supported by Windows Firewall`, '');
+      continue;
+    }
+    const rule = resolveRule(original, devMap);
+    if (!rule) {
+      lines.push(`# Skipped "${psEscape(original.name)}": referenced device has no known IP yet`, '');
       continue;
     }
 
@@ -207,8 +247,9 @@ function psEscape(value: string): string {
   return (value || '').replace(/[`"$]/g, '');
 }
 
-export function validatePolicies(policies: FirewallPolicy[]): string[] {
+export function validatePolicies(policies: FirewallPolicy[], devices: DeviceRef[] = []): string[] {
   const errors: string[] = [];
+  const devMap = buildDeviceMap(devices);
 
   for (const p of policies) {
     if (!p.name.trim()) errors.push(`Rule ${p.id}: name is required`);
@@ -223,6 +264,15 @@ export function validatePolicies(policies: FirewallPolicy[]): string[] {
     }
     if (p.dst_ip !== 'any' && !isValidIpOrCidr(p.dst_ip)) {
       errors.push(`Rule "${p.name}": invalid destination IP "${p.dst_ip}"`);
+    }
+
+    // Device-ID matches must reference a known, resolvable device.
+    for (const [field, value] of [['source', p.src_device], ['destination', p.dst_device]] as const) {
+      if (value && value !== 'any') {
+        const dev = devMap.get(value);
+        if (!dev) errors.push(`Rule "${p.name}": ${field} device is no longer enrolled`);
+        else if (!dev.ip_address) errors.push(`Rule "${p.name}": ${field} device "${dev.hostname || value}" has no known IP yet`);
+      }
     }
 
     const hasPorts = (p.src_port && p.src_port !== 'any') || (p.dst_port && p.dst_port !== 'any');

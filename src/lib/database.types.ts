@@ -91,6 +91,8 @@ export interface FirewallPolicy {
   direction: 'inbound' | 'outbound' | 'forward';
   src_ip: string;
   dst_ip: string;
+  src_device: string;
+  dst_device: string;
   src_port: string;
   dst_port: string;
   protocol: 'tcp' | 'udp' | 'icmp' | 'any';

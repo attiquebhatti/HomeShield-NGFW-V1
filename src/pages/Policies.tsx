@@ -54,13 +54,16 @@ interface AppCatalog { applications: AppOption[]; categories: string[]; }
 
 type ApplyStatus = 'idle' | 'validating' | 'previewing' | 'applying' | 'confirming' | 'rolled_back' | 'confirmed';
 
+type OsTarget = 'linux' | 'windows';
+
 interface ApplyState {
   status: ApplyStatus;
   validationErrors: string[];
-  compiledOutput: string;
-  osTarget: 'linux' | 'windows';
+  outputs: Partial<Record<OsTarget, string>>;
+  targets: OsTarget[];
+  previewOs: OsTarget;
   countdown: number;
-  applyId: string | null;
+  applyIds: string[];
 }
 
 const ROLLBACK_SECONDS = 30;
@@ -295,14 +298,16 @@ export function Policies() {
   const [search, setSearch] = useState('');
   const [filterAction, setFilterAction] = useState('all');
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewOs, setPreviewOs] = useState<OsTarget>('linux');
 
   const [applyState, setApplyState] = useState<ApplyState>({
     status: 'idle',
     validationErrors: [],
-    compiledOutput: '',
-    osTarget: 'linux',
+    outputs: {},
+    targets: [],
+    previewOs: 'linux',
     countdown: ROLLBACK_SECONDS,
-    applyId: null,
+    applyIds: [],
   });
 
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -369,51 +374,42 @@ export function Policies() {
     fetchPolicies();
   }
 
-  async function handleApply(osTarget: 'linux' | 'windows') {
-    setApplyState(s => ({ ...s, status: 'validating', osTarget, validationErrors: [] }));
+  // OS targets to push to: the OSes actually enrolled, else both as a fallback.
+  function applyTargets(): OsTarget[] {
+    const present = [...new Set(devices.map(d => d.os).filter((o): o is OsTarget => o === 'linux' || o === 'windows'))];
+    return present.length ? present : ['linux', 'windows'];
+  }
+
+  async function handleApply() {
+    setApplyState(s => ({ ...s, status: 'validating', validationErrors: [] }));
     const errors = validatePolicies(policies.filter(p => p.enabled), devices);
     if (errors.length > 0) {
       setApplyState(s => ({ ...s, status: 'idle', validationErrors: errors }));
       return;
     }
-    const compiled = osTarget === 'linux'
-      ? compileNftables(policies, devices)
-      : compileWindowsFirewall(policies, devices);
-    setApplyState(s => ({ ...s, status: 'previewing', compiledOutput: compiled }));
+    const targets = applyTargets();
+    const outputs: Partial<Record<OsTarget, string>> = {};
+    if (targets.includes('linux')) outputs.linux = compileNftables(policies, devices);
+    if (targets.includes('windows')) outputs.windows = compileWindowsFirewall(policies, devices);
+    setApplyState(s => ({ ...s, status: 'previewing', outputs, targets, previewOs: targets[0] }));
   }
 
   async function confirmApply() {
-    const { osTarget, compiledOutput } = applyState;
-    const { data: record } = await api.from('rule_apply_history').insert({
-      applied_by: 'admin',
-      mode: 'host',
-      os_target: osTarget,
-      rules_count: policies.filter(p => p.enabled).length,
-      // The enforcement agent picks up 'pending' jobs, applies the ruleset on
-      // the target machine, and transitions the status to applied/failed.
-      status: 'pending',
+    const { targets, outputs } = applyState;
+    const rulesCount = policies.filter(p => p.enabled).length;
+    const { data } = await api.post<{ jobs: { os_target: string; id: string }[]; rollback_timer_seconds: number }>('policies/apply', {
       rollback_timer_seconds: ROLLBACK_SECONDS,
-      compiled_output: compiledOutput,
-      rules_snapshot: policies,
+      targets: targets.map(os => ({ os_target: os, compiled_output: outputs[os] ?? '', rules_count: rulesCount })),
     });
+    const applyIds = (data?.jobs ?? []).map(j => j.id);
 
-    await api.from('audit_log').insert({
-      actor: 'admin',
-      action: 'apply',
-      resource_type: 'firewall_ruleset',
-      details: { rules_count: policies.filter(p => p.enabled).length, os_target: osTarget, mode: 'atomic' },
-      ip_address: '127.0.0.1',
-    });
-
-    const applyId = typeof record?.id === 'string' ? record.id : null;
     let remaining = ROLLBACK_SECONDS;
-    setApplyState(s => ({ ...s, status: 'confirming', countdown: remaining, applyId }));
-
+    setApplyState(s => ({ ...s, status: 'confirming', countdown: remaining, applyIds }));
     countdownRef.current = setInterval(() => {
       remaining--;
       if (remaining <= 0) {
         clearInterval(countdownRef.current!);
-        triggerRollback(applyId);
+        triggerRollback(applyIds);
       } else {
         setApplyState(s => ({ ...s, countdown: remaining }));
       }
@@ -422,29 +418,14 @@ export function Policies() {
 
   async function handleUserConfirm() {
     if (countdownRef.current) clearInterval(countdownRef.current);
-    const { applyId } = applyState;
-    if (applyId) {
-      await api.from('rule_apply_history')
-        .update({ status: 'confirmed', confirmed_at: new Date().toISOString() })
-        .eq('id', applyId);
-    }
+    const { applyIds } = applyState;
+    if (applyIds.length) await api.post('policies/apply/resolve', { ids: applyIds, status: 'confirmed' });
     setApplyState(s => ({ ...s, status: 'confirmed', countdown: 0 }));
     setTimeout(() => setApplyState(s => ({ ...s, status: 'idle' })), 3000);
   }
 
-  async function triggerRollback(applyId: string | null) {
-    if (applyId) {
-      await api.from('rule_apply_history')
-        .update({ status: 'rolled_back', rolled_back_at: new Date().toISOString() })
-        .eq('id', applyId);
-    }
-    await api.from('audit_log').insert({
-      actor: 'system',
-      action: 'rollback',
-      resource_type: 'firewall_ruleset',
-      details: { reason: 'timer_expired', apply_id: applyId },
-      ip_address: '127.0.0.1',
-    });
+  async function triggerRollback(applyIds: string[]) {
+    if (applyIds.length) await api.post('policies/apply/resolve', { ids: applyIds, status: 'rolled_back' });
     setApplyState(s => ({ ...s, status: 'rolled_back', countdown: 0 }));
     setTimeout(() => setApplyState(s => ({ ...s, status: 'idle' })), 5000);
   }
@@ -469,7 +450,7 @@ export function Policies() {
           onConfirm={handleUserConfirm}
           onRollback={() => {
             if (countdownRef.current) clearInterval(countdownRef.current);
-            triggerRollback(applyState.applyId);
+            triggerRollback(applyState.applyIds);
           }}
         />
       )}
@@ -486,28 +467,15 @@ export function Policies() {
             <Button variant="ghost" size="sm" onClick={() => setPreviewOpen(true)}>
               <Code2 className="w-4 h-4" /> Preview
             </Button>
-            <div className="flex items-center">
-              <Button
-                variant={applyState.status === 'confirmed' ? 'success' : 'primary'}
-                onClick={() => handleApply('linux')}
-                disabled={isConfirming || applyState.status === 'confirmed'}
-                size="sm"
-                className="rounded-r-none border-r-0"
-              >
-                <Server className="w-3.5 h-3.5" />
-                {applyState.status === 'confirmed' ? 'Confirmed!' : 'Apply (Linux)'}
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => handleApply('windows')}
-                disabled={isConfirming}
-                size="sm"
-                className="rounded-l-none"
-              >
-                <Monitor className="w-3.5 h-3.5" />
-                Windows
-              </Button>
-            </div>
+            <Button
+              variant={applyState.status === 'confirmed' ? 'success' : 'primary'}
+              onClick={handleApply}
+              disabled={isConfirming || applyState.status === 'confirmed'}
+              size="sm"
+            >
+              <Play className="w-3.5 h-3.5" />
+              {applyState.status === 'confirmed' ? 'Confirmed!' : 'Apply'}
+            </Button>
             <Button variant="primary" onClick={openCreate} size="sm">
               <Plus className="w-4 h-4" /> New Policy
             </Button>
@@ -660,9 +628,9 @@ export function Policies() {
                       {(['linux', 'windows'] as const).map(os => (
                         <button
                           key={os}
-                          onClick={() => setApplyState(s => ({ ...s, osTarget: os }))}
+                          onClick={() => setPreviewOs(os)}
                           className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                            applyState.osTarget === os ? 'bg-brand-slate text-text-primary' : 'text-text-muted hover:text-text-secondary'
+                            previewOs === os ? 'bg-brand-slate text-text-primary' : 'text-text-muted hover:text-text-secondary'
                           }`}
                         >
                           {os === 'linux' ? <Server className="w-3 h-3" /> : <Monitor className="w-3 h-3" />}
@@ -678,7 +646,7 @@ export function Policies() {
               </CardHeader>
               <div className="bg-brand-main rounded-b-xl overflow-x-auto">
                 <pre className="p-5 text-xs font-mono text-brand-gold/80 leading-relaxed whitespace-pre overflow-x-auto max-h-96">
-                  {applyState.osTarget === 'linux'
+                  {previewOs === 'linux'
                     ? compileNftables(policies, devices)
                     : compileWindowsFirewall(policies, devices)
                   }
@@ -704,7 +672,7 @@ export function Policies() {
         <Modal
           open={applyState.status === 'previewing'}
           onClose={() => setApplyState(s => ({ ...s, status: 'idle' }))}
-          title={`Preview & Apply — ${applyState.osTarget === 'linux' ? 'nftables' : 'Windows Firewall'}`}
+          title="Preview & Apply"
           size="xl"
         >
           <div className="space-y-4">
@@ -712,17 +680,32 @@ export function Policies() {
               <AlertTriangle className="w-4 h-4 text-warning flex-shrink-0 mt-0.5" />
               <div className="text-xs text-warning">
                 <p className="font-medium mb-0.5">Review before applying</p>
-                <p>After applying, you have <strong>{ROLLBACK_SECONDS} seconds</strong> to confirm or rules will automatically roll back.</p>
+                <p>
+                  One rulebase, pushed to {applyState.targets.map(t => t === 'linux' ? 'Linux agents' : 'Windows agents').join(' and ')}.
+                  After applying, you have <strong>{ROLLBACK_SECONDS} seconds</strong> to confirm or every agent rolls back automatically.
+                </p>
               </div>
             </div>
+            {applyState.targets.length > 1 && (
+              <div className="flex bg-brand-main rounded-lg p-0.5 gap-0.5 w-fit">
+                {applyState.targets.map(os => (
+                  <button key={os} onClick={() => setApplyState(s => ({ ...s, previewOs: os }))}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                      applyState.previewOs === os ? 'bg-brand-slate text-text-primary' : 'text-text-muted hover:text-text-secondary'}`}>
+                    {os === 'linux' ? <Server className="w-3 h-3" /> : <Monitor className="w-3 h-3" />}
+                    {os === 'linux' ? 'nftables' : 'PowerShell'}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="bg-brand-main rounded-xl overflow-x-auto border border-border-muted">
               <pre className="p-4 text-xs font-mono text-brand-gold/80 leading-relaxed max-h-80 overflow-y-auto whitespace-pre">
-                {applyState.compiledOutput}
+                {applyState.outputs[applyState.previewOs]}
               </pre>
             </div>
             <div className="flex justify-between items-center pt-2 border-t border-border-muted">
               <div className="text-xs text-text-muted">
-                {policies.filter(p => p.enabled).length} rules will be applied
+                {policies.filter(p => p.enabled).length} rules → {applyState.targets.join(' + ')}
               </div>
               <div className="flex gap-3">
                 <Button variant="ghost" onClick={() => setApplyState(s => ({ ...s, status: 'idle' }))}>Cancel</Button>

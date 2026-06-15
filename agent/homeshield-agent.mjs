@@ -25,6 +25,7 @@ import { promisify } from 'node:util';
 import { mkdir, writeFile, readFile, stat as statFile, open as openFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import dgram from 'node:dgram';
 import { parseKernelLogLine, parseConntrack, splitJournalOutput } from './parsers.mjs';
 import { parseQuery, buildBlockResponse, createMatcher, sinkholeAddress } from './dns.mjs';
@@ -239,6 +240,43 @@ async function sendTelemetry() {
   await api('/telemetry', {
     method: 'POST',
     body: JSON.stringify({ interfaces, health, sessions }),
+  });
+}
+
+// ─── Device enrollment ───────────────────────────────────────────────────────
+// Registers this host in the device inventory (persisted device-id) so the
+// unified rulebase can target/tag it and Linux jobs are distributed to it.
+
+const DEVICE_ID_FILE = join(STATE_DIR, 'device-id');
+let deviceId = '';
+
+async function loadDeviceId() {
+  try {
+    deviceId = (await readFile(DEVICE_ID_FILE, 'utf8')).trim();
+  } catch { /* generate below */ }
+  if (!deviceId) {
+    deviceId = randomUUID();
+    await writeFile(DEVICE_ID_FILE, deviceId, 'utf8');
+  }
+}
+
+async function registerDevice() {
+  let ip = '';
+  try {
+    const ifaces = await collectInterfaces();
+    const primary = ifaces.find(i => i.ip_address && i.name !== 'lo' && !i.ip_address.startsWith('169.254'));
+    ip = primary?.ip_address || '';
+  } catch {}
+  await api('/register', {
+    method: 'POST',
+    body: JSON.stringify({
+      device_id: deviceId,
+      hostname: os.hostname(),
+      os: 'linux',
+      os_version: `${os.type()} ${os.release()}`,
+      agent_version: '1.0.0',
+      ip_address: ip,
+    }),
   });
 }
 
@@ -849,7 +887,8 @@ async function main() {
   await mkdir(STATE_DIR, { recursive: true });
   await loadCursor();
   await loadEveOffset();
-  log(`HomeShield agent started — API ${API}, state dir ${STATE_DIR}`);
+  await loadDeviceId();
+  log(`HomeShield agent started — API ${API}, state dir ${STATE_DIR}, device ${deviceId}`);
 
   let lastTelemetry = 0;
   let lastConfigRefresh = 0;
@@ -921,6 +960,11 @@ async function main() {
     }
 
     if (Date.now() - lastTelemetry > TELEMETRY_SECONDS * 1000) {
+      try {
+        await registerDevice();
+      } catch (e) {
+        log('Register error:', e.message);
+      }
       try {
         await sendTelemetry();
         lastTelemetry = Date.now();

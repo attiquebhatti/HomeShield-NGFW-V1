@@ -1050,6 +1050,54 @@ api.get('/app-catalog', (_req, res) => {
   res.json({ data: { applications: listApplications(), categories: listCategories() } });
 });
 
+// Unified rulebase apply. One rulebase, one Apply: the UI compiles the shared
+// policies for each target OS and posts them here; we supersede any prior
+// pending jobs for that OS and queue a fresh one. Each device's agent pulls
+// the job for its own OS and enforces it (with commit-confirm rollback).
+api.post('/policies/apply', async (req, res) => {
+  try {
+    const targets = (Array.isArray(req.body?.targets) ? req.body.targets : [])
+      .filter(t => ['linux', 'windows'].includes(t.os_target));
+    if (!targets.length) return res.status(400).json({ error: 'No valid targets' });
+    const timer = Math.max(10, Math.min(parseInt(req.body?.rollback_timer_seconds, 10) || 30, 600));
+
+    const jobs = [];
+    for (const t of targets) {
+      // Replacing the ruleset: drop superseded pending jobs for this OS.
+      await query("DELETE FROM rule_apply_history WHERE os_target = ? AND status = 'pending'", [t.os_target]);
+      const id = randomUUID();
+      await query(
+        `INSERT INTO rule_apply_history (id, applied_at, applied_by, mode, os_target, rules_count, status, rollback_timer_seconds, compiled_output)
+         VALUES (?, ?, ?, 'host', ?, ?, 'pending', ?, ?)`,
+        [id, now(), req.user.email, t.os_target, parseInt(t.rules_count, 10) || 0, timer, t.compiled_output || '']
+      );
+      jobs.push({ os_target: t.os_target, id });
+    }
+    await query(
+      'INSERT INTO audit_log (id, timestamp, actor, action, resource_type, resource_id, details, ip_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [randomUUID(), now(), req.user.email, 'apply', 'firewall_ruleset', null, JSON.stringify({ targets: targets.map(t => t.os_target) }), req.ip || '']
+    );
+    res.json({ data: { jobs, rollback_timer_seconds: timer } });
+  } catch (e) {
+    serverError(res, 'policies apply', e);
+  }
+});
+
+// Confirm or roll back a set of apply jobs (the commit half of commit-confirm).
+api.post('/policies/apply/resolve', async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const status = req.body?.status === 'confirmed' ? 'confirmed' : 'rolled_back';
+    if (!ids.length) return res.status(400).json({ error: 'ids required' });
+    const col = status === 'confirmed' ? 'confirmed_at' : 'rolled_back_at';
+    const placeholders = ids.map(() => '?').join(',');
+    await query(`UPDATE rule_apply_history SET status = ?, ${col} = ? WHERE id IN (${placeholders})`, [status, now(), ...ids]);
+    res.json({ data: { status, count: ids.length } });
+  } catch (e) {
+    serverError(res, 'policies apply resolve', e);
+  }
+});
+
 // ─── WireGuard VPN ───────────────────────────────────────────────────────
 
 const VPN_SERVER_FIELDS = ['interface', 'listen_port', 'address', 'endpoint', 'dns', 'enabled'];

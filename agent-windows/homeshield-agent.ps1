@@ -142,7 +142,46 @@ function Sync-Vpn {
   } catch { Write-Log "VPN provisioning failed: $_" }
 }
 
-# ─── 4. Health telemetry ────────────────────────────────────────────────────
+# ─── 4. DNS category / App-ID enforcement (hosts-file sinkhole) ──────────────
+# App-ID and URL-category policies are domain-based, so we enforce them on the
+# endpoint by sinkholing their domains in the Windows hosts file. The server's
+# /dns-config returns the block/allow lists (DNS entries + threat domains +
+# enabled App-ID/URL policy domains).
+function Sync-Dns {
+  $cfg = Invoke-Agent -Method GET -Path '/dns-config'
+  $hostsPath = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
+  $begin = '# HomeShield BEGIN (managed - do not edit)'
+  $end = '# HomeShield END'
+
+  $entries = New-Object System.Collections.Generic.List[string]
+  if ($cfg.enabled -and $cfg.entries) {
+    $allow = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($e in $cfg.entries) { if ($e.list_type -eq 'allowlist' -and $e.domain) { [void]$allow.Add(($e.domain).ToLower().Trim()) } }
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($e in $cfg.entries) {
+      if ($e.list_type -eq 'allowlist') { continue }
+      $d = ($e.domain).ToLower().Trim()
+      if (-not $d -or $allow.Contains($d)) { continue }
+      # apex + common subdomains (hosts can't wildcard)
+      foreach ($h in @($d, "www.$d", "m.$d")) {
+        if ($seen.Add($h)) { $entries.Add("0.0.0.0 $h"); $entries.Add(":: $h") }
+      }
+    }
+  }
+
+  $content = if (Test-Path $hostsPath) { Get-Content $hostsPath -Raw } else { '' }
+  $clean = [regex]::Replace($content, "(?s)\r?\n?$([regex]::Escape($begin)).*?$([regex]::Escape($end))", '').TrimEnd()
+  $managed = if ($entries.Count) { "`r`n$begin`r`n" + ($entries -join "`r`n") + "`r`n$end`r`n" } else { '' }
+  $new = if ($clean) { "$clean$managed" } else { $managed.TrimStart("`r", "`n") }
+
+  if ($new -ne $content) {
+    Set-Content -Path $hostsPath -Value $new -Encoding ASCII -Force
+    ipconfig /flushdns | Out-Null
+    Write-Log "DNS enforcement: $($entries.Count / 2) host entries sinkholed"
+  }
+}
+
+# ─── 5. Health telemetry ────────────────────────────────────────────────────
 function Send-Health {
   try {
     $os = Get-CimInstance Win32_OperatingSystem
@@ -168,6 +207,7 @@ $lastHealth = [datetime]::MinValue
 while ($true) {
   try { Register-Device } catch { Write-Log "register: $_" }
   try { Sync-Firewall }  catch { Write-Log "firewall: $_" }
+  try { Sync-Dns }       catch { Write-Log "dns: $_" }
   try { Sync-Vpn }       catch { Write-Log "vpn: $_" }
   if ((Get-Date) - $lastHealth -gt [timespan]::FromSeconds(60)) {
     Send-Health

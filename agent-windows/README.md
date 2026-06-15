@@ -14,10 +14,22 @@ provisions the IKEv2/IPSec VPN client, and reports health.
    operator doesn't confirm in the UI within the timer, the agent removes the
    HomeShield rules (reverting to Windows defaults — a desktop can't be locked
    out this way).
-3. **VPN** — when IPSec is enabled and the gateway CA is provisioned, the agent
+3. **DNS category / App-ID enforcement** — App-ID and URL-category policies are
+   domain-based, so the agent enforces them on the endpoint by sinkholing the
+   category's domains in the Windows **hosts file** (a managed
+   `# HomeShield BEGIN … END` block), then flushing the DNS cache. This is what
+   makes "block social media / gaming" parental-control policies take effect on
+   the machine. Requires **DNS Filtering** enabled in Settings.
+
+   Limitation: the hosts file can't wildcard, so the agent sinkholes each
+   category domain plus its `www.`/`m.` subdomains. This is very effective for
+   social and gaming (apex/www domains), but streaming CDNs with random
+   subdomains (e.g. `*.googlevideo.com`) can leak — for complete coverage, run
+   the Linux gateway's suffix-matching DNS proxy and point clients' DNS at it.
+4. **VPN** — when IPSec is enabled and the gateway CA is provisioned, the agent
    imports the CA into Trusted Root and creates the **HomeShield VPN** IKEv2
    connection. You then connect with a VPN username/password.
-4. **Health** — CPU/RAM/disk snapshot every 60s.
+5. **Health** — CPU/RAM/disk snapshot every 60s.
 
 ## Prerequisites
 

@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import {
   Plus, Pencil, Trash2, ToggleLeft, ToggleRight, Search,
   Play, RotateCcw, CheckCircle2, AlertTriangle, Code2, X,
-  Terminal, Monitor, Server
+  Terminal, Monitor, Server, GitCommit
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { Card, CardHeader } from '../components/ui/Card';
@@ -299,6 +299,8 @@ export function Policies() {
   const [filterAction, setFilterAction] = useState('all');
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewOs, setPreviewOs] = useState<OsTarget>('linux');
+  const [configStatus, setConfigStatus] = useState<{ pending: number; never_committed: boolean }>({ pending: 0, never_committed: false });
+  const [revertOpen, setRevertOpen] = useState(false);
 
   const [applyState, setApplyState] = useState<ApplyState>({
     status: 'idle',
@@ -331,7 +333,17 @@ export function Policies() {
     if (data) setCatalog(data);
   }
 
-  useEffect(() => { fetchPolicies(); fetchDevices(); fetchCatalog(); }, []);
+  async function fetchStatus() {
+    const { data } = await api.get<{ pending: number; never_committed: boolean }>('config/status');
+    setConfigStatus(data ?? { pending: 0, never_committed: false });
+  }
+
+  async function revertConfig() {
+    await api.post('config/revert');
+    await Promise.all([fetchPolicies(), fetchStatus()]);
+  }
+
+  useEffect(() => { fetchPolicies(); fetchDevices(); fetchCatalog(); fetchStatus(); }, []);
   useEffect(() => () => { if (countdownRef.current) clearInterval(countdownRef.current); }, []);
 
   const deviceName = (ref: string) =>
@@ -361,17 +373,20 @@ export function Policies() {
     setSaving(false);
     setModalOpen(false);
     fetchPolicies();
+    fetchStatus();
   }
 
   async function handleDelete(id: string) {
     await api.from('firewall_policies').delete().eq('id', id);
     setDeleteId(null);
     fetchPolicies();
+    fetchStatus();
   }
 
   async function toggleEnabled(policy: FirewallPolicy) {
     await api.from('firewall_policies').update({ enabled: !policy.enabled }).eq('id', policy.id);
     fetchPolicies();
+    fetchStatus();
   }
 
   // OS targets to push to: the OSes actually enrolled, else both as a fallback.
@@ -421,6 +436,7 @@ export function Policies() {
     const { applyIds } = applyState;
     if (applyIds.length) await api.post('policies/apply/resolve', { ids: applyIds, status: 'confirmed' });
     setApplyState(s => ({ ...s, status: 'confirmed', countdown: 0 }));
+    fetchStatus(); // running config now matches candidate
     setTimeout(() => setApplyState(s => ({ ...s, status: 'idle' })), 3000);
   }
 
@@ -460,21 +476,29 @@ export function Policies() {
           <div>
             <h1 className="text-xl font-bold text-text-primary">Firewall Policies</h1>
             <p className="text-sm text-text-muted mt-0.5">
-              {policies.length} rules · {enabledCount} active · evaluated in priority order
+              {policies.length} rules · {enabledCount} active ·{' '}
+              {configStatus.pending > 0
+                ? <span className="text-brand-gold">candidate · {configStatus.pending} uncommitted</span>
+                : <span className="text-success">running config in sync</span>}
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <Button variant="ghost" size="sm" onClick={() => setPreviewOpen(true)}>
               <Code2 className="w-4 h-4" /> Preview
             </Button>
+            {configStatus.pending > 0 && (
+              <Button variant="ghost" size="sm" onClick={() => setRevertOpen(true)} disabled={isConfirming}>
+                <RotateCcw className="w-3.5 h-3.5" /> Revert
+              </Button>
+            )}
             <Button
               variant={applyState.status === 'confirmed' ? 'success' : 'primary'}
               onClick={handleApply}
               disabled={isConfirming || applyState.status === 'confirmed'}
               size="sm"
             >
-              <Play className="w-3.5 h-3.5" />
-              {applyState.status === 'confirmed' ? 'Confirmed!' : 'Apply'}
+              <GitCommit className="w-3.5 h-3.5" />
+              {applyState.status === 'confirmed' ? 'Committed!' : configStatus.pending > 0 ? `Commit (${configStatus.pending})` : 'Commit'}
             </Button>
             <Button variant="primary" onClick={openCreate} size="sm">
               <Plus className="w-4 h-4" /> New Policy
@@ -722,6 +746,17 @@ export function Policies() {
           <div className="flex justify-end gap-3 mt-6">
             <Button variant="ghost" onClick={() => setDeleteId(null)}>Cancel</Button>
             <Button variant="danger" onClick={() => deleteId && handleDelete(deleteId)}>Delete</Button>
+          </div>
+        </Modal>
+
+        <Modal open={revertOpen} onClose={() => setRevertOpen(false)} title="Revert to Running Config" size="sm">
+          <p className="text-sm text-text-secondary">
+            Discard all <strong>{configStatus.pending}</strong> uncommitted change{configStatus.pending === 1 ? '' : 's'} and
+            restore the policies to the last committed (running) config?
+          </p>
+          <div className="flex justify-end gap-3 mt-6">
+            <Button variant="ghost" onClick={() => setRevertOpen(false)}>Cancel</Button>
+            <Button variant="danger" onClick={() => { revertConfig(); setRevertOpen(false); }}>Revert Changes</Button>
           </div>
         </Modal>
       </div>

@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   Shield, LayoutDashboard, FileText, Globe, AlertTriangle,
   Network, Settings, ChevronLeft, ChevronRight,
   Activity, Map, Rss, BookOpen, Menu, Bell,
-  HardDrive, LogOut, Lock, AppWindow, Globe2, UserCircle, UsersRound, MonitorSmartphone
+  HardDrive, LogOut, Lock, AppWindow, Globe2, UserCircle, UsersRound, MonitorSmartphone, GitCommit
 } from 'lucide-react';
 import { useAuth } from '../lib/auth';
+import { api } from '../lib/api';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -36,6 +37,15 @@ export function Layout() {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const visibleNav = navItems.filter(item => !item.adminOnly || user?.role === 'admin');
+  const [pending, setPending] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    const load = () => api.get<{ pending: number }>('config/status').then(r => { if (active) setPending(r.data?.pending ?? 0); }).catch(() => {});
+    load();
+    const t = setInterval(load, 15000);
+    return () => { active = false; clearInterval(t); };
+  }, []);
 
   async function handleSignOut() {
     await signOut();
@@ -124,6 +134,16 @@ export function Layout() {
               <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
               <span className="text-xs text-success font-medium">Firewall Active</span>
             </div>
+            {pending > 0 && (
+              <button
+                onClick={() => navigate('/policies')}
+                title="Uncommitted policy changes — click to review and commit"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-gold/15 border border-brand-gold/30 hover:bg-brand-gold/25 transition-colors"
+              >
+                <GitCommit className="w-3.5 h-3.5 text-brand-gold" />
+                <span className="text-xs text-brand-gold font-medium">{pending} uncommitted</span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2">

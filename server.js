@@ -15,6 +15,7 @@ import { buildWindowsInstaller } from './ipsec.mjs';
 import { buildWindowsBootstrap, buildWindowsCmd } from './bootstrap.mjs';
 import { verifyGoogleIdToken } from './google.mjs';
 import { listApplications, listCategories, appDomains, categoryDomains } from './appsignatures.mjs';
+import { diffPolicies } from './configdiff.mjs';
 
 const { hash, compare } = bcrypt;
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1061,15 +1062,18 @@ api.post('/policies/apply', async (req, res) => {
     if (!targets.length) return res.status(400).json({ error: 'No valid targets' });
     const timer = Math.max(10, Math.min(parseInt(req.body?.rollback_timer_seconds, 10) || 30, 600));
 
+    // Snapshot the candidate (current policies) — promoted to running on confirm.
+    const snapshot = JSON.stringify(castRows(await query('SELECT * FROM firewall_policies')));
+
     const jobs = [];
     for (const t of targets) {
       // Replacing the ruleset: drop superseded pending jobs for this OS.
       await query("DELETE FROM rule_apply_history WHERE os_target = ? AND status = 'pending'", [t.os_target]);
       const id = randomUUID();
       await query(
-        `INSERT INTO rule_apply_history (id, applied_at, applied_by, mode, os_target, rules_count, status, rollback_timer_seconds, compiled_output)
-         VALUES (?, ?, ?, 'host', ?, ?, 'pending', ?, ?)`,
-        [id, now(), req.user.email, t.os_target, parseInt(t.rules_count, 10) || 0, timer, t.compiled_output || '']
+        `INSERT INTO rule_apply_history (id, applied_at, applied_by, mode, os_target, rules_count, status, rollback_timer_seconds, compiled_output, rules_snapshot)
+         VALUES (?, ?, ?, 'host', ?, ?, 'pending', ?, ?, ?)`,
+        [id, now(), req.user.email, t.os_target, parseInt(t.rules_count, 10) || 0, timer, t.compiled_output || '', snapshot]
       );
       jobs.push({ os_target: t.os_target, id });
     }
@@ -1084,6 +1088,7 @@ api.post('/policies/apply', async (req, res) => {
 });
 
 // Confirm or roll back a set of apply jobs (the commit half of commit-confirm).
+// On confirm, the applied snapshot becomes the running config.
 api.post('/policies/apply/resolve', async (req, res) => {
   try {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
@@ -1092,9 +1097,76 @@ api.post('/policies/apply/resolve', async (req, res) => {
     const col = status === 'confirmed' ? 'confirmed_at' : 'rolled_back_at';
     const placeholders = ids.map(() => '?').join(',');
     await query(`UPDATE rule_apply_history SET status = ?, ${col} = ? WHERE id IN (${placeholders})`, [status, now(), ...ids]);
+
+    if (status === 'confirmed') {
+      const rows = await query(`SELECT rules_snapshot FROM rule_apply_history WHERE id = ? LIMIT 1`, [ids[0]]);
+      const snapshot = rows[0]?.rules_snapshot;
+      if (snapshot) {
+        await query(
+          "INSERT INTO server_secrets (`key`, value, updated_at) VALUES ('running_policies', ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
+          [snapshot, now()]
+        );
+      }
+    }
     res.json({ data: { status, count: ids.length } });
   } catch (e) {
     serverError(res, 'policies apply resolve', e);
+  }
+});
+
+// Candidate-vs-running status: how many uncommitted policy changes exist.
+api.get('/config/status', async (_req, res) => {
+  try {
+    const candidate = castRows(await query('SELECT * FROM firewall_policies'));
+    const rows = await query("SELECT value, updated_at FROM server_secrets WHERE `key` = 'running_policies' LIMIT 1");
+    let running = [];
+    try { running = rows[0]?.value ? JSON.parse(rows[0].value) : []; } catch {}
+    res.json({
+      data: {
+        ...diffPolicies(candidate, running),
+        candidate_count: candidate.length,
+        running_count: running.length,
+        never_committed: !rows.length,
+        last_commit: rows[0]?.updated_at ? castRow(rows[0]).updated_at : null,
+      },
+    });
+  } catch (e) {
+    serverError(res, 'config status', e);
+  }
+});
+
+// Revert the candidate to the running config (discard uncommitted changes).
+api.post('/config/revert', async (req, res) => {
+  try {
+    if ((req.user.role || 'admin') === 'viewer') return res.status(403).json({ error: 'Read-only role' });
+    const rows = await query("SELECT value FROM server_secrets WHERE `key` = 'running_policies' LIMIT 1");
+    if (!rows.length) return res.status(409).json({ error: 'No running config to revert to — nothing has been committed yet' });
+    let running = [];
+    try { running = JSON.parse(rows[0].value); } catch { return res.status(500).json({ error: 'Corrupt running config' }); }
+
+    const cols = INSERTABLE_COLS['firewall-policies'].filter(c => c !== 'updated_at');
+    const conn = await getPool().getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.execute('DELETE FROM firewall_policies');
+      for (const p of running) {
+        const data = { id: p.id || randomUUID() };
+        for (const c of cols) if (p[c] !== undefined) data[c] = (p[c] !== null && typeof p[c] === 'object') ? JSON.stringify(p[c]) : p[c];
+        data.created_at = p.created_at || now();
+        const names = Object.keys(data).map(c => `\`${safeName(c)}\``).join(', ');
+        const ph = Object.keys(data).map(() => '?').join(', ');
+        await conn.execute(`INSERT INTO firewall_policies (${names}) VALUES (${ph})`, Object.values(data));
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+    res.json({ data: { reverted: running.length } });
+  } catch (e) {
+    serverError(res, 'config revert', e);
   }
 });
 

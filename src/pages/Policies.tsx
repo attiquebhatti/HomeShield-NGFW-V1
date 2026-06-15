@@ -49,7 +49,8 @@ const emptyPolicy: Omit<FirewallPolicy, 'id' | 'created_at' | 'updated_at'> = {
 };
 
 interface DeviceOption { id: string; hostname: string; ip_address: string; os?: string; }
-interface AppCatalog { applications: string[]; categories: string[]; }
+interface AppOption { name: string; category: string; risk: number }
+interface AppCatalog { applications: AppOption[]; categories: string[]; }
 
 type ApplyStatus = 'idle' | 'validating' | 'previewing' | 'applying' | 'confirming' | 'rolled_back' | 'confirmed';
 
@@ -174,7 +175,13 @@ function PolicyForm({
             <label className={l}>Application (App-ID)</label>
             <select className={i} value={value.app_id} onChange={e => set('app_id', e.target.value)}>
               <option value="any">Any</option>
-              {catalog.applications.map(a => <option key={a} value={a}>{a}</option>)}
+              {catalog.categories.map(cat => (
+                <optgroup key={cat} label={cat}>
+                  {catalog.applications.filter(a => a.category === cat).map(a => (
+                    <option key={a.name} value={a.name}>{a.name}</option>
+                  ))}
+                </optgroup>
+              ))}
             </select>
           </div>
           <div>

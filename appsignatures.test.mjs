@@ -2,16 +2,19 @@ import { describe, it, expect } from 'vitest';
 import { listApplications, listCategories, appDomains, categoryDomains } from './appsignatures.mjs';
 
 describe('app/URL signature catalog', () => {
-  it('lists distinct, sorted applications', () => {
+  it('lists applications with name/category/risk, sorted by name', () => {
     const apps = listApplications();
-    expect(apps).toContain('YouTube');
-    expect(apps).toContain('Netflix');
-    expect([...new Set(apps)]).toEqual(apps);   // unique
-    expect([...apps].sort()).toEqual(apps);     // sorted
+    const names = apps.map(a => a.name);
+    expect(names).toContain('YouTube');
+    expect(names).toContain('Netflix');
+    expect([...names].sort((a, b) => a.localeCompare(b))).toEqual(names); // sorted
+    const yt = apps.find(a => a.name === 'YouTube');
+    expect(yt).toMatchObject({ category: 'streaming', risk: 3 });
   });
 
-  it('lists content categories', () => {
-    expect(listCategories()).toEqual(expect.arrayContaining(['streaming', 'social', 'gaming', 'messaging']));
+  it('has a substantial catalog across many categories', () => {
+    expect(listApplications().length).toBeGreaterThan(100);
+    expect(listCategories()).toEqual(expect.arrayContaining(['streaming', 'social', 'gaming', 'messaging', 'vpn-proxy', 'remote-access', 'ai']));
   });
 
   it('maps an application to all its identifying domains', () => {

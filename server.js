@@ -1,6 +1,6 @@
 import express from 'express';
 import mysql from 'mysql2/promise';
-import { createHmac, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
+import { createHmac, createHash, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -1103,12 +1103,26 @@ api.post('/policies/apply/resolve', async (req, res) => {
     await query(`UPDATE rule_apply_history SET status = ?, ${col} = ? WHERE id IN (${placeholders})`, [status, now(), ...ids]);
 
     if (status === 'confirmed') {
-      const rows = await query(`SELECT rules_snapshot FROM rule_apply_history WHERE id = ? LIMIT 1`, [ids[0]]);
-      const snapshot = rows[0]?.rules_snapshot;
+      const rows = await query(
+        `SELECT rules_snapshot, os_target, compiled_output FROM rule_apply_history WHERE id IN (${placeholders})`,
+        ids
+      );
+      const snapshot = rows.find(r => r.rules_snapshot)?.rules_snapshot;
       if (snapshot) {
         await query(
           "INSERT INTO server_secrets (`key`, value, updated_at) VALUES ('running_policies', ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
           [snapshot, now()]
+        );
+      }
+      // Persist the compiled ruleset per OS so agents can RECONCILE to the
+      // running config every cycle. This is what makes enforcement self-healing:
+      // an agent that missed the (transient) pending job — because it was offline
+      // or the operator confirmed before its next poll — still converges here.
+      for (const r of rows) {
+        if (!['linux', 'windows'].includes(r.os_target)) continue;
+        await query(
+          "INSERT INTO server_secrets (`key`, value, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
+          [`running_ruleset_${r.os_target}`, r.compiled_output || '', now()]
         );
       }
     }
@@ -1546,6 +1560,23 @@ agent.get('/job', async (req, res) => {
     res.json({ data: rows.length ? castRow(rows[0]) : null });
   } catch (e) {
     serverError(res, 'agent job', e);
+  }
+});
+
+// Running ruleset for steady-state reconciliation. The agent fetches this every
+// cycle and re-applies if the hash changed (or its rules drifted), so a device
+// always converges to the committed running config — even if it missed the
+// transient pending job. `compiled_output` is empty when nothing is committed
+// yet, which tells the agent to clear its managed rules.
+agent.get('/ruleset', async (req, res) => {
+  try {
+    const os = req.query.os === 'windows' ? 'windows' : 'linux';
+    const rows = await query("SELECT value, updated_at FROM server_secrets WHERE `key` = ? LIMIT 1", [`running_ruleset_${os}`]);
+    const compiled = rows[0]?.value || '';
+    const hash = createHash('sha256').update(compiled).digest('hex').slice(0, 16);
+    res.json({ data: { os, compiled_output: compiled, hash, updated_at: rows[0]?.updated_at || null } });
+  } catch (e) {
+    serverError(res, 'agent ruleset', e);
   }
 });
 

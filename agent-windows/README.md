@@ -9,11 +9,17 @@ provisions the IKEv2/IPSec VPN client, and reports health.
 1. **Device enrollment / heartbeat** — registers a persistent device-ID,
    hostname, OS and IP. The device appears on the **Devices** page (online if
    seen in the last 2 minutes).
-2. **Firewall policy** — picks up pending Windows apply jobs and applies them
-   via `New-NetFirewallRule`, with the same **commit-confirm rollback**: if the
-   operator doesn't confirm in the UI within the timer, the agent removes the
-   HomeShield rules (reverting to Windows defaults — a desktop can't be locked
-   out this way).
+2. **Firewall policy (reconcile)** — every cycle the agent fetches the committed
+   **running** ruleset and converges to it via `New-NetFirewallRule`. This is
+   self-healing: if the device was offline (or the operator confirmed the commit
+   before the agent's next poll) the rules are still picked up, and if something
+   externally deletes the managed `HomeShield-*` rules they're re-applied. A
+   Windows desktop can't be locked out by its host firewall, so it needs no
+   commit-confirm rollback timer — that safety net is for the Linux gateway.
+
+   Note: device-scoped rules are enforced **host-wide** (no `-LocalAddress`
+   pin), so "block this device" covers both IPv4 and IPv6 and survives a DHCP
+   address change.
 3. **DNS category / App-ID enforcement** — App-ID and URL-category policies are
    domain-based, so the agent enforces them on the endpoint by sinkholing the
    category's domains in the Windows **hosts file** (a managed

@@ -15,8 +15,9 @@
 param([string]$ConfigPath = "$env:ProgramData\HomeShield\agent.json")
 
 $ErrorActionPreference = 'Stop'
-$AgentVersion = '1.0.0'
+$AgentVersion = '1.1.0'
 $VpnName = 'HomeShield VPN'
+$script:LastRulesetHash = ''
 
 # ─── Config & identity ──────────────────────────────────────────────────────
 if (-not (Test-Path $ConfigPath)) { throw "Config not found at $ConfigPath - run install.ps1 first" }
@@ -80,48 +81,43 @@ function Register-Device {
   $script:State.registered = $true
 }
 
-# ─── 2. Firewall policy apply (commit-confirm) ──────────────────────────────
+# ─── 2. Firewall policy reconcile ───────────────────────────────────────────
+# The agent converges to the committed RUNNING config every cycle, rather than
+# only consuming a one-shot "pending" job. This is self-healing: if the device
+# was offline (or the operator confirmed before the agent's next poll) when the
+# rules were committed, the agent still picks them up here. It also re-applies
+# if something externally removed the managed rules. A Windows desktop can't be
+# locked out by a host firewall, so it needs no commit-confirm rollback (that
+# safety net is for the Linux gateway).
 function Sync-Firewall {
-  $resp = Invoke-Agent -Method GET -Path '/job?os=windows'
-  $job = $resp.data
-  if (-not $job) { return }
-  Write-Log "Applying firewall job $($job.id) ($($job.rules_count) rules)"
+  $r = (Invoke-Agent -Method GET -Path '/ruleset?os=windows').data
+  if (-not $r) { return }
 
-  try {
-    if ($job.compiled_output) {
-      # The compiled script removes old HomeShield-* rules then adds the new
-      # ruleset (authored by an admin on the management server).
-      Invoke-Expression $job.compiled_output
-    }
-    Invoke-Agent -Method POST -Path "/job/$($job.id)/result" -Body @{ status = 'applied' } | Out-Null
-  } catch {
-    Write-Log "Apply failed: $_"
-    Invoke-Agent -Method POST -Path "/job/$($job.id)/result" -Body @{ status = 'failed'; error_message = "$_" } | Out-Null
+  # How many HomeShield rules are currently present (detect external tampering).
+  $present = @(Get-NetFirewallRule -DisplayName 'HomeShield-*' -ErrorAction SilentlyContinue).Count
+  $wantRules = if ($r.compiled_output) { ([regex]::Matches($r.compiled_output, 'New-NetFirewallRule')).Count } else { 0 }
+
+  # Already converged: hash unchanged AND the expected rules are still in place.
+  if ($r.hash -eq $script:LastRulesetHash -and $present -ge $wantRules -and ($wantRules -gt 0 -or $present -eq 0)) {
+    $script:State.firewall = "$present rules (running $($r.hash))"
     return
   }
 
-  # Commit-confirm: wait for the operator to confirm; otherwise revert.
-  $timer = [int]$job.rollback_timer_seconds
-  if ($timer -le 0) { $timer = 30 }
-  $deadline = (Get-Date).AddSeconds($timer + 10)
-  $confirmed = $false
-  while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 2
-    try {
-      $st = (Invoke-Agent -Method GET -Path "/job/$($job.id)").data.status
-      if ($st -eq 'confirmed') { $confirmed = $true; break }
-      if ($st -eq 'rolled_back' -or $st -eq 'failed') { break }
-    } catch {}
-  }
-  if (-not $confirmed) {
-    Write-Log "Job $($job.id) not confirmed - removing HomeShield rules (revert to Windows defaults)"
-    Get-NetFirewallRule -DisplayName 'HomeShield-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
-    try { Invoke-Agent -Method POST -Path "/job/$($job.id)/result" -Body @{ status = 'rolled_back' } | Out-Null } catch {}
-    $script:State.firewall = "rolled back (not confirmed) @ $(Get-Date -Format 'HH:mm:ss')"
+  if ($r.compiled_output) {
+    Write-Log "Reconciling firewall to running config (hash $($r.hash), $wantRules rules)"
+    # The compiled script removes old HomeShield-* rules then adds the running
+    # ruleset (compiled by the management server from admin-authored policy).
+    Invoke-Expression $r.compiled_output
+    $now = @(Get-NetFirewallRule -DisplayName 'HomeShield-*' -ErrorAction SilentlyContinue).Count
+    $script:State.firewall = "$now rules applied (running $($r.hash)) @ $(Get-Date -Format 'HH:mm:ss')"
   } else {
-    Write-Log "Job $($job.id) confirmed"
-    $script:State.firewall = "$($job.rules_count) rules applied @ $(Get-Date -Format 'HH:mm:ss')"
+    if ($present -gt 0) {
+      Write-Log 'No committed ruleset - clearing HomeShield rules'
+      Get-NetFirewallRule -DisplayName 'HomeShield-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    }
+    $script:State.firewall = "no managed rules (nothing committed) @ $(Get-Date -Format 'HH:mm:ss')"
   }
+  $script:LastRulesetHash = $r.hash
 }
 
 # ─── 3. IKEv2 VPN client provisioning ───────────────────────────────────────

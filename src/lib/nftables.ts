@@ -253,11 +253,16 @@ export function compileWindowsFirewall(policies: FirewallPolicy[], devices: Devi
     let cmd = `New-NetFirewallRule -DisplayName "HomeShield-${psEscape(rule.name)}" \`\n`;
     cmd += `  -Direction ${dir} -Action ${action} -Protocol ${proto} \`\n`;
 
-    // Inbound: remote = source, local = destination. Outbound: remote = destination.
+    // The agent runs *on* the device, so every rule it creates already only
+    // affects this host — the "self" side (source on outbound, destination on
+    // inbound) needs no address scoping. We deliberately do NOT pin
+    // -LocalAddress to the device's registered IP: that would be IPv4-only
+    // (traffic leaks over IPv6) and would break on a DHCP/IP change. Only the
+    // *remote* peer is constrained, so a "block this device" rule covers both
+    // address families, host-wide. (The src/dst_device match still gates whether
+    // the rule is emitted at all — see resolveRef above.)
     const remoteIp = outbound ? winAddr(d.ips, rule.dst_ip) : winAddr(s.ips, rule.src_ip);
-    const localIp = outbound ? winAddr(s.ips, rule.src_ip) : winAddr(d.ips, rule.dst_ip);
     if (remoteIp) cmd += `  -RemoteAddress "${remoteIp}" \`\n`;
-    if (localIp) cmd += `  -LocalAddress "${localIp}" \`\n`;
 
     if (hasPorts) {
       const remotePort = outbound ? rule.dst_port : rule.src_port;

@@ -137,6 +137,28 @@ describe('compileWindowsFirewall', () => {
     const out = compileWindowsFirewall([policy()]);
     expect(out).toContain('-ErrorAction SilentlyContinue');
   });
+
+  it('never pins -LocalAddress to the device IP (would leak over IPv6)', () => {
+    const devices = [{ id: 'self', hostname: 'pc', ip_address: '10.0.56.28', tags: [] }];
+    // "block this device's outbound to anywhere" — the classic parental-control rule
+    const out = compileWindowsFirewall(
+      [policy({ name: 'BlockAll', action: 'deny', direction: 'outbound', src_device: 'self' })],
+      devices,
+    );
+    expect(out).toContain('New-NetFirewallRule -DisplayName "HomeShield-BlockAll"');
+    expect(out).toContain('-Direction Outbound -Action Block');
+    // host-wide: no address constraint at all, so it covers IPv4 *and* IPv6
+    expect(out).not.toContain('-LocalAddress');
+    expect(out).not.toContain('-RemoteAddress');
+  });
+
+  it('still constrains the remote peer when the destination is specific', () => {
+    const out = compileWindowsFirewall([
+      policy({ name: 'ToHost', action: 'deny', direction: 'outbound', dst_ip: '1.2.3.4' }),
+    ]);
+    expect(out).toContain('-RemoteAddress "1.2.3.4"');
+    expect(out).not.toContain('-LocalAddress');
+  });
 });
 
 describe('device-ID matching', () => {

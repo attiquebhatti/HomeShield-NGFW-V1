@@ -40,6 +40,17 @@ function Write-Log($msg) {
   try { Add-Content -Path (Join-Path $StateDir 'agent.log') -Value $line -ErrorAction SilentlyContinue } catch {}
 }
 
+# Live status written each cycle to status.json for the local status command.
+$script:State = [ordered]@{
+  version = $AgentVersion; device_id = $DeviceId; api = $Api
+  registered = $false; firewall = 'not applied yet'; dns = 'no rules'
+  vpn = 'off'; last_error = ''; updated = ''
+}
+function Write-Status {
+  $script:State.updated = (Get-Date -Format 'o')
+  try { $script:State | ConvertTo-Json | Set-Content -Path (Join-Path $StateDir 'status.json') -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+}
+
 # ─── API helper ─────────────────────────────────────────────────────────────
 function Invoke-Agent {
   param([string]$Method, [string]$Path, $Body)
@@ -66,6 +77,7 @@ function Register-Device {
     device_id = $DeviceId; hostname = $env:COMPUTERNAME; os = 'windows'
     os_version = $osv; agent_version = $AgentVersion; ip_address = $ip
   } | Out-Null
+  $script:State.registered = $true
 }
 
 # ─── 2. Firewall policy apply (commit-confirm) ──────────────────────────────
@@ -105,8 +117,10 @@ function Sync-Firewall {
     Write-Log "Job $($job.id) not confirmed - removing HomeShield rules (revert to Windows defaults)"
     Get-NetFirewallRule -DisplayName 'HomeShield-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
     try { Invoke-Agent -Method POST -Path "/job/$($job.id)/result" -Body @{ status = 'rolled_back' } | Out-Null } catch {}
+    $script:State.firewall = "rolled back (not confirmed) @ $(Get-Date -Format 'HH:mm:ss')"
   } else {
     Write-Log "Job $($job.id) confirmed"
+    $script:State.firewall = "$($job.rules_count) rules applied @ $(Get-Date -Format 'HH:mm:ss')"
   }
 }
 
@@ -179,6 +193,7 @@ function Sync-Dns {
     ipconfig /flushdns | Out-Null
     Write-Log "DNS enforcement: $($entries.Count / 2) host entries sinkholed"
   }
+  $script:State.dns = if ($cfg.enabled) { "$($entries.Count / 2) domains sinkholed" } else { 'DNS filtering off' }
 }
 
 # ─── 5. Health telemetry ────────────────────────────────────────────────────
@@ -205,13 +220,15 @@ Write-Log "HomeShield Windows agent $AgentVersion starting - device $DeviceId, A
 $lastHealth = [datetime]::MinValue
 
 while ($true) {
-  try { Register-Device } catch { Write-Log "register: $_" }
-  try { Sync-Firewall }  catch { Write-Log "firewall: $_" }
-  try { Sync-Dns }       catch { Write-Log "dns: $_" }
-  try { Sync-Vpn }       catch { Write-Log "vpn: $_" }
+  $script:State.last_error = ''
+  try { Register-Device } catch { Write-Log "register: $_"; $script:State.registered = $false; $script:State.last_error = "register: $_" }
+  try { Sync-Firewall }  catch { Write-Log "firewall: $_"; $script:State.last_error = "firewall: $_" }
+  try { Sync-Dns }       catch { Write-Log "dns: $_"; $script:State.last_error = "dns: $_" }
+  try { Sync-Vpn }       catch { Write-Log "vpn: $_"; $script:State.last_error = "vpn: $_" }
   if ((Get-Date) - $lastHealth -gt [timespan]::FromSeconds(60)) {
     Send-Health
     $lastHealth = Get-Date
   }
+  Write-Status
   Start-Sleep -Seconds $PollSeconds
 }

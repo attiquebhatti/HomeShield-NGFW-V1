@@ -941,9 +941,11 @@ api.get('/agent-download/windows', (req, res) => {
     const scriptPath = join(__dirname, 'agent-windows', 'homeshield-agent.ps1');
     if (!existsSync(scriptPath)) return res.status(404).json({ error: 'Windows agent not bundled with this build' });
     const agentScript = readFileSync(scriptPath, 'utf8');
+    const statusPath = join(__dirname, 'agent-windows', 'homeshield-status.ps1');
+    const statusScript = existsSync(statusPath) ? readFileSync(statusPath, 'utf8') : '';
     const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
     const host = req.get('host') || '';
-    const bootstrap = buildWindowsBootstrap(agentScript, host ? `${proto}://${host}` : '');
+    const bootstrap = buildWindowsBootstrap(agentScript, host ? `${proto}://${host}` : '', statusScript);
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="homeshield-install.ps1"');
     res.send(bootstrap);
@@ -961,9 +963,11 @@ api.get('/agent-download/windows-cmd', (req, res) => {
     const scriptPath = join(__dirname, 'agent-windows', 'homeshield-agent.ps1');
     if (!existsSync(scriptPath)) return res.status(404).json({ error: 'Windows agent not bundled with this build' });
     const agentScript = readFileSync(scriptPath, 'utf8');
+    const statusPath = join(__dirname, 'agent-windows', 'homeshield-status.ps1');
+    const statusScript = existsSync(statusPath) ? readFileSync(statusPath, 'utf8') : '';
     const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
     const host = req.get('host') || '';
-    const cmd = buildWindowsCmd(agentScript, host ? `${proto}://${host}` : '', effectiveAgentToken());
+    const cmd = buildWindowsCmd(agentScript, host ? `${proto}://${host}` : '', effectiveAgentToken(), statusScript);
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', 'attachment; filename="homeshield-install.cmd"');
     res.send(cmd);

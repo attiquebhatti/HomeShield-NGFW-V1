@@ -18,6 +18,9 @@ $TaskName = 'HomeShieldAgent'
 
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 Copy-Item -Path (Join-Path $PSScriptRoot 'homeshield-agent.ps1') -Destination (Join-Path $Dir 'homeshield-agent.ps1') -Force
+# Local status command (run elevated to see agent health on the box).
+$statusSrc = Join-Path $PSScriptRoot 'homeshield-status.ps1'
+if (Test-Path $statusSrc) { Copy-Item -Path $statusSrc -Destination (Join-Path $Dir 'homeshield-status.ps1') -Force }
 
 @{ api = $Api; token = $Token; poll_seconds = $PollSeconds } |
   ConvertTo-Json | Set-Content -Path (Join-Path $Dir 'agent.json') -Encoding UTF8
@@ -42,4 +45,5 @@ Start-ScheduledTask -TaskName $TaskName
 Write-Host "HomeShield agent installed and started." -ForegroundColor Green
 Write-Host "  Config: $Dir\agent.json"
 Write-Host "  Logs:   $Dir\agent.log"
+Write-Host "  Status: powershell -ExecutionPolicy Bypass -File $Dir\homeshield-status.ps1"
 Write-Host "  Manage: Get-ScheduledTask HomeShieldAgent | Get-ScheduledTaskInfo"

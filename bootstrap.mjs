@@ -5,12 +5,23 @@
  */
 
 /**
- * @param agentScript the full text of agent-windows/homeshield-agent.ps1
- * @param defaultApi  the management API base URL to pre-fill (from the request)
+ * @param agentScript  the full text of agent-windows/homeshield-agent.ps1
+ * @param defaultApi   the management API base URL to pre-fill (from the request)
+ * @param statusScript optional text of agent-windows/homeshield-status.ps1, also
+ *                     dropped into the install dir so the operator gets the local
+ *                     `homeshield-status.ps1` health command.
  */
-export function buildWindowsBootstrap(agentScript, defaultApi = '') {
+export function buildWindowsBootstrap(agentScript, defaultApi = '', statusScript = '') {
   const b64 = Buffer.from(agentScript || '', 'utf8').toString('base64');
   const api = String(defaultApi || '').replace(/[`"$]/g, '');
+  const statusLines = statusScript
+    ? [
+        '',
+        '# Embedded local status command',
+        `$statusB64 = "${Buffer.from(statusScript, 'utf8').toString('base64')}"`,
+        '[IO.File]::WriteAllBytes((Join-Path $Dir "homeshield-status.ps1"), [Convert]::FromBase64String($statusB64))',
+      ]
+    : [];
 
   return [
     '<#  HomeShield NGFW - Windows agent installer (self-contained).',
@@ -30,6 +41,7 @@ export function buildWindowsBootstrap(agentScript, defaultApi = '') {
     '# Embedded agent script',
     `$agentB64 = "${b64}"`,
     '[IO.File]::WriteAllBytes((Join-Path $Dir "homeshield-agent.ps1"), [Convert]::FromBase64String($agentB64))',
+    ...statusLines,
     '',
     '@{ api = $Api; token = $Token; poll_seconds = $PollSeconds } |',
     '  ConvertTo-Json | Set-Content -Path (Join-Path $Dir "agent.json") -Encoding UTF8',
@@ -62,10 +74,16 @@ export function buildWindowsBootstrap(agentScript, defaultApi = '') {
  *
  * NOTE: embeds the agent token, so this download is admin-only.
  */
-export function buildWindowsCmd(agentScript, api, token) {
+export function buildWindowsCmd(agentScript, api, token, statusScript = '') {
   const b64 = Buffer.from(agentScript || '', 'utf8').toString('base64');
   const apiLit = String(api || '').replace(/'/g, "''");
   const tokenLit = String(token || '').replace(/'/g, "''");
+  const statusLines = statusScript
+    ? [
+        `$statusB64 = '${Buffer.from(statusScript, 'utf8').toString('base64')}'`,
+        '[IO.File]::WriteAllBytes((Join-Path $Dir "homeshield-status.ps1"), [Convert]::FromBase64String($statusB64))',
+      ]
+    : [];
 
   const lines = [
     '@echo off',
@@ -84,6 +102,7 @@ export function buildWindowsCmd(agentScript, api, token) {
     '$Dir = "$env:ProgramData\\HomeShield"',
     'New-Item -ItemType Directory -Force -Path $Dir | Out-Null',
     '[IO.File]::WriteAllBytes((Join-Path $Dir "homeshield-agent.ps1"), [Convert]::FromBase64String($agentB64))',
+    ...statusLines,
     '@{ api = $Api; token = $Token; poll_seconds = 15 } | ConvertTo-Json | Set-Content -Path (Join-Path $Dir "agent.json") -Encoding UTF8',
     'try { icacls $Dir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" | Out-Null } catch {}',
     '$agentPath = Join-Path $Dir "homeshield-agent.ps1"',
@@ -95,7 +114,8 @@ export function buildWindowsCmd(agentScript, api, token) {
     'Register-ScheduledTask -TaskName "HomeShieldAgent" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null',
     'Start-ScheduledTask -TaskName "HomeShieldAgent"',
     'Write-Host "HomeShield agent installed and started." -ForegroundColor Green',
-    'Write-Host "Logs: $Dir\\agent.log"',
+    'Write-Host "Logs:   $Dir\\agent.log"',
+    'Write-Host "Status: powershell -ExecutionPolicy Bypass -File $Dir\\homeshield-status.ps1"',
     'Start-Sleep -Seconds 4',
   ];
   return lines.join('\r\n');

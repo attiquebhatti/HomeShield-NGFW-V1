@@ -65,6 +65,21 @@ Get-Content $env:ProgramData\HomeShield\agent.log -Tail 20
 
 Within ~15s the device should appear on the **Devices** page.
 
+## Check status locally
+
+The agent is **headless** — it runs as a SYSTEM background task with no window.
+The web console's **Devices** page is its GUI (online state, OS, IP, last seen).
+For a quick health check *on the machine itself*, the installer also drops a
+local status command. From an **elevated** PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File $env:ProgramData\HomeShield\homeshield-status.ps1
+```
+
+It prints the scheduled-task state, last heartbeat, registration, applied
+firewall rules, DNS-sinkholed domain count, and the tail of the agent log —
+the same data the agent reports to the console, read straight from the box.
+
 ## Connect the VPN
 
 Once IPSec is enabled on the gateway and the agent has created the connection:

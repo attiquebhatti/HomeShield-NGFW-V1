@@ -30,6 +30,15 @@ describe('buildWindowsBootstrap', () => {
   it('handles an empty default API', () => {
     expect(buildWindowsBootstrap(agent, '')).toContain('$Api = ""');
   });
+
+  it('embeds the optional status script when provided', () => {
+    const status = 'Write-Host "status"';
+    const withStatus = buildWindowsBootstrap(agent, 'https://x', status);
+    expect(withStatus).toContain(Buffer.from(status, 'utf8').toString('base64'));
+    expect(withStatus).toContain('homeshield-status.ps1');
+    // and omits it when not provided
+    expect(out).not.toContain('homeshield-status.ps1');
+  });
 });
 
 describe('buildWindowsCmd', () => {
@@ -60,5 +69,14 @@ describe('buildWindowsCmd', () => {
   it('uses CRLF line endings and escapes single quotes', () => {
     expect(out).toContain('\r\n');
     expect(buildWindowsCmd(agent, "a'b", "t'k")).toContain("$Token = 't''k'");
+  });
+
+  it('embeds the optional status script when provided', () => {
+    const status = 'Write-Host "status"';
+    const withStatus = buildWindowsCmd(agent, 'https://x', 'tok', status);
+    expect(withStatus).toContain(Buffer.from(status, 'utf8').toString('base64'));
+    expect(withStatus).toContain('$statusB64');
+    // the base file still hints at the status command, but only writes it when bundled
+    expect(out).not.toContain('$statusB64');
   });
 });

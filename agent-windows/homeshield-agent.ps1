@@ -180,6 +180,9 @@ function Sync-Dns {
   }
 
   $content = if (Test-Path $hostsPath) { Get-Content $hostsPath -Raw } else { '' }
+  # Get-Content -Raw returns $null (not '') for an empty file; guard so the
+  # regex below never gets a null input.
+  if ($null -eq $content) { $content = '' }
   $clean = [regex]::Replace($content, "(?s)\r?\n?$([regex]::Escape($begin)).*?$([regex]::Escape($end))", '').TrimEnd()
   $managed = if ($entries.Count) { "`r`n$begin`r`n" + ($entries -join "`r`n") + "`r`n$end`r`n" } else { '' }
   $new = if ($clean) { "$clean$managed" } else { $managed.TrimStart("`r", "`n") }

@@ -13,6 +13,7 @@ import { generateSecret, verifyTOTP, otpauthURL } from './totp.mjs';
 import { renderPrometheus, groupSamples } from './metrics.mjs';
 import { buildWindowsInstaller } from './ipsec.mjs';
 import { buildWindowsBootstrap, buildWindowsCmd } from './bootstrap.mjs';
+import { compileNftables, compileWindowsFirewall } from './src/lib/firewall-compile.mjs';
 import { verifyGoogleIdToken } from './google.mjs';
 import { listApplications, listCategories, appDomains, categoryDomains } from './appsignatures.mjs';
 import { diffPolicies } from './configdiff.mjs';
@@ -1104,7 +1105,7 @@ api.post('/policies/apply/resolve', async (req, res) => {
 
     if (status === 'confirmed') {
       const rows = await query(
-        `SELECT rules_snapshot, os_target, compiled_output FROM rule_apply_history WHERE id IN (${placeholders})`,
+        `SELECT rules_snapshot FROM rule_apply_history WHERE id IN (${placeholders})`,
         ids
       );
       const snapshot = rows.find(r => r.rules_snapshot)?.rules_snapshot;
@@ -1114,17 +1115,9 @@ api.post('/policies/apply/resolve', async (req, res) => {
           [snapshot, now()]
         );
       }
-      // Persist the compiled ruleset per OS so agents can RECONCILE to the
-      // running config every cycle. This is what makes enforcement self-healing:
-      // an agent that missed the (transient) pending job — because it was offline
-      // or the operator confirmed before its next poll — still converges here.
-      for (const r of rows) {
-        if (!['linux', 'windows'].includes(r.os_target)) continue;
-        await query(
-          "INSERT INTO server_secrets (`key`, value, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = VALUES(updated_at)",
-          [`running_ruleset_${r.os_target}`, r.compiled_output || '', now()]
-        );
-      }
+      // Note: agents reconcile against the running config compiled ON DEMAND by
+      // GET /agent/ruleset, so there is no per-OS compiled ruleset to persist
+      // here — the running_policies snapshot above is the single source of truth.
     }
     res.json({ data: { status, count: ids.length } });
   } catch (e) {
@@ -1566,15 +1559,27 @@ agent.get('/job', async (req, res) => {
 // Running ruleset for steady-state reconciliation. The agent fetches this every
 // cycle and re-applies if the hash changed (or its rules drifted), so a device
 // always converges to the committed running config — even if it missed the
-// transient pending job. `compiled_output` is empty when nothing is committed
-// yet, which tells the agent to clear its managed rules.
+// transient pending job.
+//
+// Compiled ON DEMAND from the committed running policies, so there is no stored
+// state that can go stale or be missed: whatever is in the running config is
+// exactly what the agent enforces. `compiled_output` clears the managed rules
+// when nothing is committed.
 agent.get('/ruleset', async (req, res) => {
   try {
     const os = req.query.os === 'windows' ? 'windows' : 'linux';
-    const rows = await query("SELECT value, updated_at FROM server_secrets WHERE `key` = ? LIMIT 1", [`running_ruleset_${os}`]);
-    const compiled = rows[0]?.value || '';
+    const rows = await query("SELECT value FROM server_secrets WHERE `key` = 'running_policies' LIMIT 1");
+    let policies = [];
+    try { policies = rows[0]?.value ? JSON.parse(rows[0].value) : []; } catch {}
+    const devices = (await query('SELECT id, hostname, ip_address, tags FROM devices')).map(d => ({
+      id: d.id, hostname: d.hostname, ip_address: d.ip_address,
+      tags: (() => { try { return JSON.parse(d.tags || '[]'); } catch { return []; } })(),
+    }));
+    const compiled = policies.length
+      ? (os === 'windows' ? compileWindowsFirewall(policies, devices) : compileNftables(policies, devices))
+      : '';
     const hash = createHash('sha256').update(compiled).digest('hex').slice(0, 16);
-    res.json({ data: { os, compiled_output: compiled, hash, updated_at: rows[0]?.updated_at || null } });
+    res.json({ data: { os, compiled_output: compiled, hash } });
   } catch (e) {
     serverError(res, 'agent ruleset', e);
   }
